@@ -6,9 +6,9 @@
 
 ## 预览
 
-![BFT 截图](./assets/screenhot.png)
+<img src="./assets/screenhot.png" alt="BFT 截图" width="760">
 
-![BFT 演示](./assets/example.gif)
+<img src="./assets/example.gif" alt="BFT 演示" width="760">
 
 ## 功能
 

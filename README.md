@@ -6,9 +6,9 @@
 
 ## Preview
 
-![BFT Screenshot](./assets/screenhot.png)
+<img src="./assets/screenhot.png" alt="BFT Screenshot" width="760">
 
-![BFT Demo](./assets/example.gif)
+<img src="./assets/example.gif" alt="BFT Demo" width="760">
 
 ## Features
 
