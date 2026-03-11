@@ -1,11 +1,10 @@
 # Binance Futures Ticker
 
-一个 Go 命令行工具，用于查看币安 U 本位合约价格，支持轮询和 WebSocket 实时订阅两种模式，界面基于 `tview/tcell`，配置通过 TOML 文件加载。
+一个 Go 命令行工具，用于查看币安 U 本位合约价格和 1 小时 K 线图，界面基于 `tview/tcell`，配置通过 TOML 文件加载。
 
 ## 功能
 
 - 支持多个合约同时显示
-- 支持自定义请求间隔
 - 支持 WebSocket 实时订阅，延迟更低
 - 基于 `tview/tcell` 的稳定 TUI 表格界面，不会一直滚屏
 - 价格上涨显示绿色，下跌显示红色，持平显示灰色
@@ -47,14 +46,11 @@ go build -o ticker .
 - `symbols`：合约列表，例如 `['ETHUSDT', 'BTCUSDT']`
 - `chart_symbol`：1 小时 K 线图使用的 symbol
 - `chart_limit`：1 小时 K 线数量
-- `interval`：轮询模式请求间隔，例如 `3s`
 - `timeout`：HTTP 请求超时 / WebSocket 连接超时，例如 `8s`
 - `retry_delay`：WebSocket 断线重连等待时间，例如 `2s`
 - `tz`：终端输出时区，例如 `Asia/Shanghai`
 - `rest_base`：REST API 地址
 - `ws_base`：WebSocket 地址
-- `mode`：`poll` 或 `ws`
-- `once`：是否只抓取一次快照并退出
 - `no_color`：是否禁用 TUI 颜色
 
 ## 界面说明
@@ -67,9 +63,7 @@ go build -o ticker .
 
 ## 说明
 
-- 多合约轮询模式下，程序会并发请求每个 symbol，避免币安接口批量查询返回全市场数据的问题。
 - WebSocket 模式使用组合流订阅多个 `@ticker` 流，并带自动重连。
-- `once = true` 会走非交互文本输出，便于脚本调用；其余模式使用 TUI。
 
 ## 示例配置
 
@@ -77,13 +71,10 @@ go build -o ticker .
 symbols = ["ETHUSDT", "BTCUSDT", "SOLUSDT"]
 chart_symbol = "ETHUSDT"
 chart_limit = 48
-interval = "3s"
 timeout = "8s"
 tz = "Asia/Shanghai"
 rest_base = "https://fapi.binance.com"
 ws_base = "wss://fstream.binance.com"
-mode = "ws"
-once = false
 no_color = false
 retry_delay = "2s"
 ```

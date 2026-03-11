@@ -1,13 +1,9 @@
 symbols = ["ETHUSDT", "BTCUSDT", "SOLUSDT"]
 chart_symbol = "ETHUSDT"
 chart_limit = 8
-interval = "3s"
 timeout = "8s"
 tz = "Asia/Shanghai"
 rest_base = "https://fapi.binance.com"
 ws_base = "wss://fstream.binance.com"
-mode = "ws"
-once = false
 no_color = false
 retry_delay = "2s"
-
