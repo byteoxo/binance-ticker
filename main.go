@@ -19,7 +19,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gdamore/tcell/v2"
 	"github.com/gorilla/websocket"
+	"github.com/rivo/tview"
 )
 
 const (
@@ -27,13 +29,7 @@ const (
 	defaultWSBaseURL   = "wss://fstream.binance.com"
 	tickerPath         = "/fapi/v2/ticker/price"
 	defaultTimeout     = 8 * time.Second
-	renderInterval     = 250 * time.Millisecond
-
-	ansiReset = "\033[0m"
-	ansiRed   = "\033[31m"
-	ansiGreen = "\033[32m"
-	ansiGray  = "\033[90m"
-	ansiBold  = "\033[1m"
+	uiRefreshInterval  = time.Second
 )
 
 type config struct {
@@ -112,6 +108,17 @@ type appState struct {
 	mode       string
 }
 
+type uiModel struct {
+	app    *tview.Application
+	header *tview.TextView
+	status *tview.TextView
+	table  *tview.Table
+	footer *tview.TextView
+	cfg    config
+	loc    *time.Location
+	state  *appState
+}
+
 func main() {
 	log.SetFlags(0)
 	log.SetPrefix("")
@@ -136,9 +143,9 @@ func parseFlags() config {
 	tzFlag := flag.String("tz", "Asia/Shanghai", "IANA timezone name for terminal output, e.g. Asia/Shanghai")
 	restBaseFlag := flag.String("base-url", defaultRESTBaseURL, "Binance Futures REST API base URL")
 	wsBaseFlag := flag.String("ws-base-url", defaultWSBaseURL, "Binance Futures WebSocket base URL")
-	modeFlag := flag.String("mode", "poll", "Data source mode: poll or ws")
-	onceFlag := flag.Bool("once", false, "Fetch once and exit; only valid in poll mode")
-	noColorFlag := flag.Bool("no-color", false, "Disable ANSI colors")
+	modeFlag := flag.String("mode", "ws", "Data source mode: poll or ws")
+	onceFlag := flag.Bool("once", false, "Fetch once and print a single snapshot")
+	noColorFlag := flag.Bool("no-color", false, "Disable color output in TUI")
 	retryDelayFlag := flag.Duration("retry-delay", 2*time.Second, "Reconnect delay for ws mode")
 	flag.Parse()
 
@@ -165,8 +172,6 @@ func parseFlags() config {
 		log.Fatal("fatal: at least one symbol is required")
 	}
 
-	noColor := *noColorFlag || os.Getenv("NO_COLOR") != ""
-
 	return config{
 		Symbols:    symbols,
 		Interval:   *intervalFlag,
@@ -176,34 +181,36 @@ func parseFlags() config {
 		WSBase:     strings.TrimRight(*wsBaseFlag, "/"),
 		Mode:       mode,
 		Once:       *onceFlag,
-		NoColor:    noColor,
+		NoColor:    *noColorFlag || os.Getenv("NO_COLOR") != "",
 		RetryDelay: *retryDelayFlag,
 	}
 }
 
 func run(ctx context.Context, client *http.Client, cfg config, loc *time.Location, state *appState) error {
-	defer restoreTerminal()
-	fmt.Print("\033[?25l")
-
-	if cfg.Mode == "poll" && cfg.Once {
+	if cfg.Once {
 		if err := runPollOnce(ctx, client, cfg, state); err != nil {
-			state.setError(err.Error())
-			renderScreen(loc, cfg, state)
 			return err
 		}
-		renderScreen(loc, cfg, state)
+		printSnapshot(cfg, loc, state)
 		return nil
 	}
 
+	ui := newUI(cfg, loc, state)
 	errCh := make(chan error, 1)
-	go renderLoop(ctx, loc, cfg, state)
+
+	go func() {
+		<-ctx.Done()
+		ui.app.QueueUpdateDraw(func() {
+			ui.app.Stop()
+		})
+	}()
 
 	go func() {
 		var err error
 		if cfg.Mode == "poll" {
-			err = runPollLoop(ctx, client, cfg, state)
+			err = runPollLoop(ctx, client, cfg, state, ui.requestDraw)
 		} else {
-			err = runWSLoop(ctx, cfg, state)
+			err = runWSLoop(ctx, cfg, state, ui.requestDraw)
 		}
 		if err != nil {
 			select {
@@ -213,14 +220,17 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 		}
 	}()
 
-	select {
-	case <-ctx.Done():
-		renderScreen(loc, cfg, state)
-		return nil
-	case err := <-errCh:
-		state.setError(err.Error())
-		renderScreen(loc, cfg, state)
+	go ui.runClock(ctx)
+
+	if err := ui.app.SetRoot(ui.layout(), true).Run(); err != nil {
 		return err
+	}
+
+	select {
+	case err := <-errCh:
+		return err
+	default:
+		return nil
 	}
 }
 
@@ -229,19 +239,22 @@ func runPollOnce(ctx context.Context, client *http.Client, cfg config, state *ap
 	if err != nil {
 		return err
 	}
+	state.clearError()
 	state.applyTickers(tickers)
 	return nil
 }
 
-func runPollLoop(ctx context.Context, client *http.Client, cfg config, state *appState) error {
+func runPollLoop(ctx context.Context, client *http.Client, cfg config, state *appState, notify func()) error {
 	update := func() {
 		tickers, err := fetchPrices(ctx, client, cfg.RESTBase, cfg.Symbols)
 		if err != nil {
 			state.setError(err.Error())
+			notify()
 			return
 		}
 		state.clearError()
 		state.applyTickers(tickers)
+		notify()
 	}
 
 	update()
@@ -258,19 +271,23 @@ func runPollLoop(ctx context.Context, client *http.Client, cfg config, state *ap
 	}
 }
 
-func runWSLoop(ctx context.Context, cfg config, state *appState) error {
+func runWSLoop(ctx context.Context, cfg config, state *appState, notify func()) error {
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
 
 		state.setError("connecting websocket...")
-		err := consumeWS(ctx, cfg, state)
+		notify()
+
+		err := consumeWS(ctx, cfg, state, notify)
 		if err == nil || ctx.Err() != nil {
 			return nil
 		}
 
 		state.setError(fmt.Sprintf("websocket disconnected: %v | retry in %s", err, cfg.RetryDelay))
+		notify()
+
 		select {
 		case <-ctx.Done():
 			return nil
@@ -279,7 +296,7 @@ func runWSLoop(ctx context.Context, cfg config, state *appState) error {
 	}
 }
 
-func consumeWS(ctx context.Context, cfg config, state *appState) error {
+func consumeWS(ctx context.Context, cfg config, state *appState, notify func()) error {
 	endpoint := buildWSURL(cfg.WSBase, cfg.Symbols)
 	dialer := websocket.Dialer{HandshakeTimeout: cfg.Timeout}
 	conn, _, err := dialer.DialContext(ctx, endpoint, nil)
@@ -289,6 +306,8 @@ func consumeWS(ctx context.Context, cfg config, state *appState) error {
 	defer conn.Close()
 
 	state.clearError()
+	notify()
+
 	conn.SetReadLimit(1 << 20)
 	_ = conn.SetReadDeadline(time.Now().Add(2 * cfg.Timeout))
 	conn.SetPongHandler(func(string) error {
@@ -315,6 +334,7 @@ func consumeWS(ctx context.Context, cfg config, state *appState) error {
 			}
 
 			state.applyTicker(ticker)
+			notify()
 		}
 	}()
 
@@ -372,11 +392,7 @@ func parseWSTicker(data []byte) (priceTicker, error) {
 		return priceTicker{}, fmt.Errorf("missing required fields in websocket payload")
 	}
 
-	return priceTicker{
-		Symbol: symbol,
-		Price:  price,
-		Time:   int64(eventTime),
-	}, nil
+	return priceTicker{Symbol: symbol, Price: price, Time: int64(eventTime)}, nil
 }
 
 func fetchPrices(ctx context.Context, client *http.Client, baseURL string, symbols []string) ([]priceTicker, error) {
@@ -469,11 +485,7 @@ func newAppState(symbols []string, mode string) *appState {
 	for _, symbol := range symbols {
 		rows[symbol] = rowState{Symbol: symbol, Status: "waiting"}
 	}
-	return &appState{
-		rows:      rows,
-		startedAt: time.Now(),
-		mode:      mode,
-	}
+	return &appState{rows: rows, startedAt: time.Now(), mode: mode}
 }
 
 func (s *appState) applyTickers(tickers []priceTicker) {
@@ -559,67 +571,184 @@ func (s *appState) snapshot() ([]rowState, string, time.Time, time.Time, string)
 	return rows, s.lastError, s.startedAt, s.lastUpdate, s.mode
 }
 
-func renderLoop(ctx context.Context, loc *time.Location, cfg config, state *appState) {
-	ticker := time.NewTicker(renderInterval)
-	defer ticker.Stop()
+func newUI(cfg config, loc *time.Location, state *appState) *uiModel {
+	app := tview.NewApplication()
+	app.SetRoot(tview.NewBox(), true)
+	tview.Styles.PrimitiveBackgroundColor = tcell.ColorDefault
+	tview.Styles.ContrastBackgroundColor = tcell.ColorDefault
+	tview.Styles.MoreContrastBackgroundColor = tcell.ColorDefault
+	tview.Styles.BorderColor = tcell.ColorGray
+	tview.Styles.TitleColor = tcell.ColorWhite
+	tview.Styles.GraphicsColor = tcell.ColorGray
+	tview.Styles.PrimaryTextColor = tcell.ColorWhite
+	tview.Styles.SecondaryTextColor = tcell.ColorSilver
+	tview.Styles.TertiaryTextColor = tcell.ColorGray
+	tview.Styles.InverseTextColor = tcell.ColorBlack
+	tview.Styles.ContrastSecondaryTextColor = tcell.ColorWhite
 
+	header := tview.NewTextView().SetDynamicColors(true)
+	status := tview.NewTextView().SetDynamicColors(true)
+	table := tview.NewTable().SetBorders(false).SetSelectable(false, false).SetFixed(1, 0)
+	footer := tview.NewTextView().SetDynamicColors(true)
+
+	header.SetBackgroundColor(tcell.ColorDefault)
+	status.SetBackgroundColor(tcell.ColorDefault)
+	table.SetBackgroundColor(tcell.ColorDefault)
+	footer.SetBackgroundColor(tcell.ColorDefault)
+	header.SetBorder(true).SetTitle("Overview")
+	status.SetBorder(true).SetTitle("Status")
+	table.SetBorder(true).SetTitle("Contracts")
+	footer.SetBorder(true)
+	footer.SetText("q / Ctrl+C to quit")
+
+	ui := &uiModel{app: app, header: header, status: status, table: table, footer: footer, cfg: cfg, loc: loc, state: state}
+	ui.refresh()
+
+	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyCtrlC:
+			app.Stop()
+			return nil
+		}
+		switch event.Rune() {
+		case 'q', 'Q':
+			app.Stop()
+			return nil
+		}
+		return event
+	})
+
+	return ui
+}
+
+func (ui *uiModel) layout() tview.Primitive {
+	content := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(ui.header, 5, 0, false).
+		AddItem(ui.status, 4, 0, false).
+		AddItem(ui.table, 0, 1, false).
+		AddItem(ui.footer, 3, 0, false)
+	return content
+}
+
+func (ui *uiModel) runClock(ctx context.Context) {
+	ticker := time.NewTicker(uiRefreshInterval)
+	defer ticker.Stop()
 	for {
-		renderScreen(loc, cfg, state)
 		select {
 		case <-ctx.Done():
-			renderScreen(loc, cfg, state)
 			return
 		case <-ticker.C:
+			ui.requestDraw()
 		}
 	}
 }
 
-func renderScreen(loc *time.Location, cfg config, state *appState) {
-	rows, lastError, startedAt, lastUpdate, mode := state.snapshot()
+func (ui *uiModel) requestDraw() {
+	ui.app.QueueUpdateDraw(func() {
+		ui.refresh()
+	})
+}
 
-	var b strings.Builder
-	b.WriteString("\033[H\033[2J")
-	b.WriteString(style(cfg, ansiBold, "Binance USD-M Futures Ticker"))
-	b.WriteString("\n")
-	b.WriteString(fmt.Sprintf("mode: %s | symbols: %s | now: %s\n", mode, strings.Join(cfg.Symbols, ","), formatTime(time.Now(), loc, false)))
+func (ui *uiModel) refresh() {
+	rows, lastError, startedAt, lastUpdate, mode := ui.state.snapshot()
+
+	ui.header.SetText(fmt.Sprintf(
+		"mode: %s\nsymbols: %s\nnow: %s\nstarted: %s\nlast update: %s",
+		mode,
+		strings.Join(ui.cfg.Symbols, ","),
+		formatTime(time.Now(), ui.loc, false),
+		formatTime(startedAt, ui.loc, false),
+		formatOptionalTime(lastUpdate, ui.loc),
+	))
+
+	statusText := "[green]ok[-]"
+	if lastError != "" {
+		statusText = ui.colorize("red", lastError)
+	}
+	transport := fmt.Sprintf("mode=%s | timeout=%s", mode, ui.cfg.Timeout)
 	if mode == "poll" {
-		b.WriteString(fmt.Sprintf("poll interval: %s | timeout: %s | rest: %s\n", cfg.Interval, cfg.Timeout, cfg.RESTBase))
+		transport = fmt.Sprintf("poll interval=%s | rest=%s", ui.cfg.Interval, ui.cfg.RESTBase)
 	} else {
-		b.WriteString(fmt.Sprintf("retry delay: %s | timeout: %s | ws: %s\n", cfg.RetryDelay, cfg.Timeout, cfg.WSBase))
+		transport = fmt.Sprintf("retry delay=%s | ws=%s", ui.cfg.RetryDelay, ui.cfg.WSBase)
 	}
-	b.WriteString(fmt.Sprintf("started: %s | last update: %s\n", formatTime(startedAt, loc, false), formatOptionalTime(lastUpdate, loc)))
-	if lastError == "" {
-		b.WriteString("status: ok\n")
-	} else {
-		b.WriteString("status: ")
-		b.WriteString(style(cfg, ansiRed, lastError))
-		b.WriteString("\n")
-	}
-	b.WriteString("\n")
-	b.WriteString(fmt.Sprintf("%-14s %-18s %-18s %-26s %-26s\n", "SYMBOL", "PRICE", "DELTA", "EXCHANGE_TIME", "LOCAL_UPDATE"))
-	b.WriteString(fmt.Sprintf("%-14s %-18s %-18s %-26s %-26s\n", strings.Repeat("-", 14), strings.Repeat("-", 18), strings.Repeat("-", 18), strings.Repeat("-", 26), strings.Repeat("-", 26)))
+	ui.status.SetText(fmt.Sprintf("status: %s\n%s", statusText, transport))
 
-	for _, row := range rows {
+	ui.renderTable(rows)
+}
+
+func (ui *uiModel) renderTable(rows []rowState) {
+	ui.table.Clear()
+	headers := []string{"SYMBOL", "PRICE", "DELTA", "EXCHANGE_TIME", "LOCAL_UPDATE"}
+	for col, header := range headers {
+		cell := tview.NewTableCell(header).
+			SetSelectable(false).
+			SetAttributes(tcell.AttrBold).
+			SetBackgroundColor(tcell.ColorDefault)
+		if !ui.cfg.NoColor {
+			cell.SetTextColor(tcell.ColorYellow)
+		}
+		ui.table.SetCell(0, col, cell)
+	}
+
+	for i, row := range rows {
 		price := row.Price
 		if price == "" {
 			price = "-"
 		}
 		delta := formatDelta(row)
-		exchangeTime := formatEpoch(row.ExchangeTime, loc)
-		localTime := formatOptionalTime(row.LocalTime, loc)
+		exchangeTime := formatEpoch(row.ExchangeTime, ui.loc)
+		localTime := formatOptionalTime(row.LocalTime, ui.loc)
 
-		b.WriteString(fmt.Sprintf(
-			"%-14s %-18s %-18s %-26s %-26s\n",
-			row.Symbol,
-			padStyled(colorByChange(cfg, row.Change, price), 18),
-			padStyled(colorByChange(cfg, row.Change, delta), 18),
-			exchangeTime,
-			localTime,
-		))
+		ui.table.SetCell(i+1, 0, tview.NewTableCell(row.Symbol).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.table.SetCell(i+1, 1, tview.NewTableCell(ui.colorByChange(row.Change, price)).SetExpansion(1).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.table.SetCell(i+1, 2, tview.NewTableCell(ui.colorByChange(row.Change, delta)).SetExpansion(1).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.table.SetCell(i+1, 3, tview.NewTableCell(exchangeTime).SetExpansion(1).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.table.SetCell(i+1, 4, tview.NewTableCell(localTime).SetExpansion(1).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
 	}
+}
 
-	b.WriteString("\nCtrl+C to quit\n")
-	fmt.Print(b.String())
+func (ui *uiModel) colorize(color, text string) string {
+	if ui.cfg.NoColor {
+		return text
+	}
+	return fmt.Sprintf("[%s]%s[-]", color, escapeTView(text))
+}
+
+func (ui *uiModel) colorByChange(change int, text string) string {
+	if ui.cfg.NoColor {
+		return text
+	}
+	switch {
+	case change > 0:
+		return fmt.Sprintf("[green]%s[-]", escapeTView(text))
+	case change < 0:
+		return fmt.Sprintf("[red]%s[-]", escapeTView(text))
+	default:
+		return fmt.Sprintf("[gray]%s[-]", escapeTView(text))
+	}
+}
+
+func escapeTView(text string) string {
+	replacer := strings.NewReplacer("[", "[[", "]", "]]")
+	return replacer.Replace(text)
+}
+
+func printSnapshot(cfg config, loc *time.Location, state *appState) {
+	rows, lastError, startedAt, lastUpdate, mode := state.snapshot()
+	fmt.Printf("mode: %s\nsymbols: %s\nstarted: %s\nlast update: %s\n", mode, strings.Join(cfg.Symbols, ","), formatTime(startedAt, loc, false), formatOptionalTime(lastUpdate, loc))
+	if lastError == "" {
+		fmt.Println("status: ok")
+	} else {
+		fmt.Printf("status: %s\n", lastError)
+	}
+	fmt.Printf("%-14s %-18s %-18s %-26s %-26s\n", "SYMBOL", "PRICE", "DELTA", "EXCHANGE_TIME", "LOCAL_UPDATE")
+	for _, row := range rows {
+		price := row.Price
+		if price == "" {
+			price = "-"
+		}
+		fmt.Printf("%-14s %-18s %-18s %-26s %-26s\n", row.Symbol, price, formatDelta(row), formatEpoch(row.ExchangeTime, loc), formatOptionalTime(row.LocalTime, loc))
+	}
 }
 
 func formatDelta(row rowState) string {
@@ -648,58 +777,6 @@ func formatTime(t time.Time, loc *time.Location, millis bool) string {
 		return t.In(loc).Format("2006-01-02 15:04:05.000 MST")
 	}
 	return t.In(loc).Format("2006-01-02 15:04:05 MST")
-}
-
-func colorByChange(cfg config, change int, text string) string {
-	switch {
-	case cfg.NoColor:
-		return text
-	case change > 0:
-		return ansiGreen + text + ansiReset
-	case change < 0:
-		return ansiRed + text + ansiReset
-	default:
-		return ansiGray + text + ansiReset
-	}
-}
-
-func style(cfg config, ansi, text string) string {
-	if cfg.NoColor {
-		return text
-	}
-	return ansi + text + ansiReset
-}
-
-func padStyled(text string, width int) string {
-	plain := stripANSI(text)
-	if len(plain) >= width {
-		return text
-	}
-	return text + strings.Repeat(" ", width-len(plain))
-}
-
-func stripANSI(input string) string {
-	var b strings.Builder
-	inEscape := false
-	for i := 0; i < len(input); i++ {
-		ch := input[i]
-		if inEscape {
-			if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') {
-				inEscape = false
-			}
-			continue
-		}
-		if ch == 0x1b {
-			inEscape = true
-			continue
-		}
-		b.WriteByte(ch)
-	}
-	return b.String()
-}
-
-func restoreTerminal() {
-	fmt.Print("\033[0m\033[?25h\n")
 }
 
 func mustLoadLocation(name string) *time.Location {
