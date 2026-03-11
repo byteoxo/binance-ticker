@@ -35,6 +35,8 @@ const (
 	defaultChartLimit  = 48
 	defaultChartHeight = 12
 	chartCandleWidth   = 3
+	chartCandleGap     = 1
+	chartStride        = chartCandleWidth + chartCandleGap
 	bullColorTag       = "#00c853"
 	bearColorTag       = "#e53935"
 	neutralColorTag    = "#9aa0a6"
@@ -1158,7 +1160,7 @@ func buildChartText(candles []klineCandle, noColor bool) string {
 		span = 1
 	}
 
-	chartWidth := len(candles) * chartCandleWidth
+	chartWidth := len(candles)*chartStride - chartCandleGap
 	rows := make([][]string, defaultChartHeight)
 	for y := 0; y < defaultChartHeight; y++ {
 		rows[y] = make([]string, chartWidth)
@@ -1168,7 +1170,7 @@ func buildChartText(candles []klineCandle, noColor bool) string {
 	}
 
 	for i, candle := range candles {
-		baseX := i * chartCandleWidth
+		baseX := i * chartStride
 		wickX := baseX + chartCandleWidth/2
 		highY := scaleValue(candle.HighValue, low, span)
 		lowY := scaleValue(candle.LowValue, low, span)
@@ -1184,12 +1186,18 @@ func buildChartText(candles []klineCandle, noColor bool) string {
 
 		upper := minInt(openY, closeY)
 		lower := maxInt(openY, closeY)
+
 		for y := highY; y <= lowY; y++ {
-			rows[y][wickX] = uiGlyph("│", noColor, color)
+			rows[y][wickX] = uiGlyph("┃", noColor, color)
 		}
 		for y := upper; y <= lower; y++ {
 			for dx := 0; dx < chartCandleWidth; dx++ {
 				rows[y][baseX+dx] = uiGlyph("█", noColor, color)
+			}
+		}
+		if upper == lower {
+			for dx := 0; dx < chartCandleWidth; dx++ {
+				rows[upper][baseX+dx] = uiGlyph("▀", noColor, color)
 			}
 		}
 	}
