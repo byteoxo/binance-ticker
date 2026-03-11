@@ -195,15 +195,18 @@ type appState struct {
 
 type uiModel struct {
 	app         *tview.Application
+	pages       *tview.Pages
 	header      *tview.TextView
 	status      *tview.TextView
 	table       *tview.Table
 	chart       *tview.TextView
 	footer      *tview.TextView
+	help        tview.Primitive
 	cfg         config
 	loc         *time.Location
 	state       *appState
 	changeChart func(int)
+	helpOpen    bool
 }
 
 func main() {
@@ -412,7 +415,7 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 
 	go ui.runClock(ctx)
 
-	if err := ui.app.SetRoot(ui.layout(), true).Run(); err != nil {
+	if err := ui.app.SetRoot(ui.root(), true).Run(); err != nil {
 		return err
 	}
 
@@ -998,6 +1001,58 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 	table := tview.NewTable().SetBorders(false).SetSelectable(false, false).SetFixed(1, 0)
 	chart := tview.NewTextView().SetDynamicColors(true)
 	footer := tview.NewTextView().SetDynamicColors(true)
+	helpTable := tview.NewTable().SetBorders(false).SetSelectable(false, false)
+	helpTable.SetBackgroundColor(tcell.ColorDefault)
+	helpTable.SetCell(0, 0, tview.NewTableCell("KEY").SetAttributes(tcell.AttrBold).SetTextColor(tcell.ColorYellow).SetSelectable(false))
+	helpTable.SetCell(0, 1, tview.NewTableCell("      ").SetSelectable(false))
+	helpTable.SetCell(0, 2, tview.NewTableCell("ACTION").SetAttributes(tcell.AttrBold).SetTextColor(tcell.ColorYellow).SetSelectable(false))
+
+	helpRows := [][2]string{
+		{"/ or h", "Open or close help"},
+		{"Up", "Previous chart symbol"},
+		{"Down", "Next chart symbol"},
+		{"q", "Quit"},
+		{"Ctrl+C", "Quit"},
+		{"Esc", "Close help"},
+	}
+	for i, row := range helpRows {
+		helpTable.SetCell(i+1, 0, tview.NewTableCell(row[0]).SetSelectable(false))
+		helpTable.SetCell(i+1, 1, tview.NewTableCell("      ").SetSelectable(false))
+		helpTable.SetCell(i+1, 2, tview.NewTableCell(row[1]).SetSelectable(false))
+	}
+
+	helpTitle := tview.NewTextView().SetDynamicColors(true)
+	helpTitle.SetBackgroundColor(tcell.ColorDefault)
+	helpTitle.SetText("[::b]Shortcuts[-]")
+
+	helpHint := tview.NewTextView().SetDynamicColors(true)
+	helpHint.SetBackgroundColor(tcell.ColorDefault)
+	helpHint.SetText("Esc / Enter / h / / to close")
+
+	helpSpacerTop := tview.NewTextView()
+	helpSpacerTop.SetBackgroundColor(tcell.ColorDefault)
+	helpSpacerBottom := tview.NewTextView()
+	helpSpacerBottom.SetBackgroundColor(tcell.ColorDefault)
+
+	helpContent := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(helpTitle, 1, 0, false).
+		AddItem(helpSpacerTop, 1, 0, false).
+		AddItem(helpTable, 0, 1, false).
+		AddItem(helpSpacerBottom, 1, 0, false).
+		AddItem(helpHint, 1, 0, false)
+	helpFrame := tview.NewFrame(helpContent)
+	helpFrame.SetBorders(1, 1, 1, 1, 2, 2)
+	helpFrame.SetBorder(true)
+	helpFrame.SetTitle("Help")
+	helpFrame.SetBackgroundColor(tcell.ColorDefault)
+
+	help := tview.NewFlex().
+		AddItem(nil, 0, 1, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
+			AddItem(nil, 0, 1, false).
+			AddItem(helpFrame, 12, 0, false).
+			AddItem(nil, 0, 1, false), 64, 0, true).
+		AddItem(nil, 0, 1, false)
 
 	header.SetBackgroundColor(tcell.ColorDefault)
 	status.SetBackgroundColor(tcell.ColorDefault)
@@ -1009,12 +1064,29 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 	table.SetBorder(true).SetTitle("Contracts")
 	chart.SetBorder(true).SetTitle("1H Chart")
 	footer.SetBorder(true)
-	footer.SetText("q / Ctrl+C to quit")
+	footer.SetText("/ or h help | Up/Down switch chart | q / Ctrl+C quit")
 
-	ui := &uiModel{app: app, header: header, status: status, table: table, chart: chart, footer: footer, cfg: cfg, loc: loc, state: state, changeChart: changeChart}
+	ui := &uiModel{app: app, header: header, status: status, table: table, chart: chart, footer: footer, help: help, cfg: cfg, loc: loc, state: state, changeChart: changeChart}
 	ui.refresh()
+	ui.pages = tview.NewPages().
+		AddPage("main", ui.layout(), true, true).
+		AddPage("help", help, true, false)
 
 	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if ui.helpOpen {
+			switch event.Key() {
+			case tcell.KeyEsc, tcell.KeyEnter:
+				ui.hideHelp()
+				return nil
+			}
+			switch event.Rune() {
+			case 'h', 'H', '/', 'q', 'Q':
+				ui.hideHelp()
+				return nil
+			}
+			return nil
+		}
+
 		switch event.Key() {
 		case tcell.KeyCtrlC:
 			app.Stop()
@@ -1031,6 +1103,9 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 			return nil
 		}
 		switch event.Rune() {
+		case 'h', 'H', '/':
+			ui.showHelp()
+			return nil
 		case 'q', 'Q':
 			app.Stop()
 			return nil
@@ -1052,6 +1127,22 @@ func (ui *uiModel) layout() tview.Primitive {
 		AddItem(body, 0, 1, false).
 		AddItem(ui.footer, 3, 0, false)
 	return content
+}
+
+func (ui *uiModel) root() tview.Primitive {
+	return ui.pages
+}
+
+func (ui *uiModel) showHelp() {
+	ui.helpOpen = true
+	ui.pages.ShowPage("help")
+	ui.app.SetFocus(ui.help)
+}
+
+func (ui *uiModel) hideHelp() {
+	ui.helpOpen = false
+	ui.pages.HidePage("help")
+	ui.app.SetFocus(ui.chart)
 }
 
 func (ui *uiModel) runClock(ctx context.Context) {
