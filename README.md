@@ -69,7 +69,7 @@ go build -o bft .
 ```toml
 symbols = ["ETHUSDT", "BTCUSDT", "SOLUSDT"]
 chart_symbol = "ETHUSDT"
-chart_limit = 48
+chart_limit = 8
 timeout = "8s"
 tz = "Asia/Shanghai"
 rest_base = "https://fapi.binance.com"
