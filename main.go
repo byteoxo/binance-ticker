@@ -215,7 +215,6 @@ func main() {
 	}
 }
 
-
 func mustLoadConfig() config {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -1019,9 +1018,10 @@ func (ui *uiModel) refresh() {
 	rows, chart, chartSymbol, lastError, startedAt, lastUpdate, mode := ui.state.snapshot()
 
 	ui.header.SetText(fmt.Sprintf(
-		"mode: %s\nsymbols: %s\nnow: %s\nstarted: %s\nlast update: %s",
+		"mode: %s\nsymbols: %s\nconfig: %s\nnow: %s\nstarted: %s\nlast update: %s",
 		mode,
 		strings.Join(ui.cfg.Symbols, ","),
+		ui.cfg.ConfigPath,
 		formatTime(time.Now(), ui.loc, false),
 		formatTime(startedAt, ui.loc, false),
 		formatOptionalTime(lastUpdate, ui.loc),
@@ -1110,7 +1110,7 @@ func escapeTView(text string) string {
 
 func printSnapshot(cfg config, loc *time.Location, state *appState) {
 	rows, chart, chartSymbol, lastError, startedAt, lastUpdate, mode := state.snapshot()
-	fmt.Printf("mode: %s\nsymbols: %s\nstarted: %s\nlast update: %s\n", mode, strings.Join(cfg.Symbols, ","), formatTime(startedAt, loc, false), formatOptionalTime(lastUpdate, loc))
+	fmt.Printf("mode: %s\nsymbols: %s\nconfig: %s\nstarted: %s\nlast update: %s\n", mode, strings.Join(cfg.Symbols, ","), cfg.ConfigPath, formatTime(startedAt, loc, false), formatOptionalTime(lastUpdate, loc))
 	if lastError == "" {
 		fmt.Println("status: ok")
 	} else {
