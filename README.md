@@ -37,8 +37,8 @@ go run .
 编译后运行：
 
 ```bash
-go build -o ticker .
-./ticker
+go build -o bft .
+./bft
 ```
 
 ## 配置字段
