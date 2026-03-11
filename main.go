@@ -26,9 +26,8 @@ import (
 )
 
 const (
-	defaultRESTBaseURL = "https://fapi.binance.com"
 	defaultWSBaseURL   = "wss://fstream.binance.com"
-	tickerPath         = "/fapi/v2/ticker/price"
+	defaultRESTBaseURL = "https://fapi.binance.com"
 	klinePath          = "/fapi/v1/klines"
 	defaultTimeout     = 8 * time.Second
 	uiRefreshInterval  = time.Second
@@ -46,13 +45,10 @@ type config struct {
 	Symbols     []string
 	ChartSymbol string
 	ChartLimit  int
-	Interval    time.Duration
 	Timeout     time.Duration
 	TZ          string
 	RESTBase    string
 	WSBase      string
-	Mode        string
-	Once        bool
 	NoColor     bool
 	RetryDelay  time.Duration
 	ConfigPath  string
@@ -62,21 +58,12 @@ type rawConfig struct {
 	Symbols     []string `toml:"symbols"`
 	ChartSymbol string   `toml:"chart_symbol"`
 	ChartLimit  int      `toml:"chart_limit"`
-	Interval    string   `toml:"interval"`
 	Timeout     string   `toml:"timeout"`
 	TZ          string   `toml:"tz"`
 	RESTBase    string   `toml:"rest_base"`
 	WSBase      string   `toml:"ws_base"`
-	Mode        string   `toml:"mode"`
-	Once        bool     `toml:"once"`
 	NoColor     bool     `toml:"no_color"`
 	RetryDelay  string   `toml:"retry_delay"`
-}
-
-type priceTicker struct {
-	Symbol string `json:"symbol"`
-	Price  string `json:"price"`
-	Time   int64  `json:"time"`
 }
 
 type wsEnvelope struct {
@@ -182,6 +169,12 @@ type klineCandle struct {
 	Closed     bool
 }
 
+type priceTicker struct {
+	Symbol string `json:"symbol"`
+	Price  string `json:"price"`
+	Time   int64  `json:"time"`
+}
+
 type appState struct {
 	mu          sync.RWMutex
 	rows        map[string]rowState
@@ -190,7 +183,6 @@ type appState struct {
 	startedAt   time.Time
 	lastError   string
 	lastUpdate  time.Time
-	mode        string
 }
 
 type uiModel struct {
@@ -216,7 +208,7 @@ func main() {
 	cfg := mustLoadConfig()
 	loc := mustLoadLocation(cfg.TZ)
 	client := &http.Client{Timeout: cfg.Timeout}
-	state := newAppState(cfg.Symbols, cfg.Mode)
+	state := newAppState(cfg.Symbols)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -246,7 +238,7 @@ func loadConfig() (config, error) {
 		return config{}, fmt.Errorf("decode config %s: %w", path, err)
 	}
 
-	required := []string{"symbols", "chart_symbol", "chart_limit", "interval", "timeout", "tz", "rest_base", "ws_base", "mode", "once", "no_color", "retry_delay"}
+	required := []string{"symbols", "chart_symbol", "chart_limit", "timeout", "tz", "rest_base", "ws_base", "no_color", "retry_delay"}
 	for _, key := range required {
 		if !meta.IsDefined(key) {
 			return config{}, fmt.Errorf("config %s missing required field %q", path, key)
@@ -267,10 +259,6 @@ func loadConfig() (config, error) {
 		return config{}, fmt.Errorf("config %s field %q must be greater than 0", path, "chart_limit")
 	}
 
-	interval, err := time.ParseDuration(strings.TrimSpace(raw.Interval))
-	if err != nil || interval <= 0 {
-		return config{}, fmt.Errorf("config %s field %q must be a valid positive duration", path, "interval")
-	}
 	timeout, err := time.ParseDuration(strings.TrimSpace(raw.Timeout))
 	if err != nil || timeout <= 0 {
 		return config{}, fmt.Errorf("config %s field %q must be a valid positive duration", path, "timeout")
@@ -293,25 +281,14 @@ func loadConfig() (config, error) {
 		return config{}, fmt.Errorf("config %s field %q cannot be empty", path, "ws_base")
 	}
 
-	mode := strings.ToLower(strings.TrimSpace(raw.Mode))
-	if mode != "poll" && mode != "ws" {
-		return config{}, fmt.Errorf("config %s field %q must be either poll or ws", path, "mode")
-	}
-	if raw.Once {
-		mode = "poll"
-	}
-
 	return config{
 		Symbols:     symbols,
 		ChartSymbol: chartSymbol,
 		ChartLimit:  chartLimit,
-		Interval:    interval,
 		Timeout:     timeout,
 		TZ:          tz,
 		RESTBase:    restBase,
 		WSBase:      wsBase,
-		Mode:        mode,
-		Once:        raw.Once,
 		NoColor:     raw.NoColor || os.Getenv("NO_COLOR") != "",
 		RetryDelay:  retryDelay,
 		ConfigPath:  path,
@@ -345,14 +322,6 @@ func resolveConfigPath() (string, error) {
 func run(ctx context.Context, client *http.Client, cfg config, loc *time.Location, state *appState) error {
 	if err := loadChartHistory(ctx, client, cfg, state); err != nil {
 		state.setError(fmt.Sprintf("chart init failed: %v", err))
-	}
-
-	if cfg.Once {
-		if err := runPollOnce(ctx, client, cfg, state); err != nil {
-			return err
-		}
-		printSnapshot(cfg, loc, state)
-		return nil
 	}
 
 	var chartMu sync.RWMutex
@@ -399,12 +368,7 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 	}()
 
 	go func() {
-		var err error
-		if cfg.Mode == "poll" {
-			err = runPollLoop(ctx, client, cfg, state, ui.requestDraw)
-		} else {
-			err = runWSLoop(ctx, cfg, state, ui.requestDraw, getChartSymbol)
-		}
+		err := runWSLoop(ctx, cfg, state, ui.requestDraw, getChartSymbol)
 		if err != nil {
 			select {
 			case errCh <- err:
@@ -424,43 +388,6 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 		return err
 	default:
 		return nil
-	}
-}
-
-func runPollOnce(ctx context.Context, client *http.Client, cfg config, state *appState) error {
-	tickers, err := fetchPrices(ctx, client, cfg.RESTBase, cfg.Symbols)
-	if err != nil {
-		return err
-	}
-	state.clearError()
-	state.applyTickers(tickers)
-	return nil
-}
-
-func runPollLoop(ctx context.Context, client *http.Client, cfg config, state *appState, notify func()) error {
-	update := func() {
-		tickers, err := fetchPrices(ctx, client, cfg.RESTBase, cfg.Symbols)
-		if err != nil {
-			state.setError(err.Error())
-			notify()
-			return
-		}
-		state.clearError()
-		state.applyTickers(tickers)
-		notify()
-	}
-
-	update()
-	ticker := time.NewTicker(cfg.Interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-			update()
-		}
 	}
 }
 
@@ -773,83 +700,6 @@ func interfaceToString(value interface{}) (string, error) {
 	}
 }
 
-func fetchPrices(ctx context.Context, client *http.Client, baseURL string, symbols []string) ([]priceTicker, error) {
-	tickers := make([]priceTicker, len(symbols))
-	errCh := make(chan error, len(symbols))
-
-	var wg sync.WaitGroup
-	for i, symbol := range symbols {
-		wg.Add(1)
-		go func(idx int, symbol string) {
-			defer wg.Done()
-
-			ticker, err := fetchSinglePrice(ctx, client, baseURL, symbol)
-			if err != nil {
-				errCh <- fmt.Errorf("symbol %s: %w", symbol, err)
-				return
-			}
-
-			tickers[idx] = ticker
-		}(i, symbol)
-	}
-
-	wg.Wait()
-	close(errCh)
-
-	for err := range errCh {
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return tickers, nil
-}
-
-func fetchSinglePrice(ctx context.Context, client *http.Client, baseURL, symbol string) (priceTicker, error) {
-	endpoint, err := buildRESTURL(baseURL, symbol)
-	if err != nil {
-		return priceTicker{}, err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return priceTicker{}, fmt.Errorf("build request: %w", err)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return priceTicker{}, fmt.Errorf("send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return priceTicker{}, fmt.Errorf("unexpected status: %s", resp.Status)
-	}
-
-	var ticker priceTicker
-	if err := json.NewDecoder(resp.Body).Decode(&ticker); err != nil {
-		return priceTicker{}, fmt.Errorf("decode ticker response: %w", err)
-	}
-	if ticker.Symbol == "" {
-		return priceTicker{}, fmt.Errorf("empty ticker response")
-	}
-
-	return ticker, nil
-}
-
-func buildRESTURL(baseURL, symbol string) (string, error) {
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		return "", fmt.Errorf("parse base url: %w", err)
-	}
-	parsed.Path = tickerPath
-
-	query := url.Values{}
-	query.Set("symbol", symbol)
-	parsed.RawQuery = query.Encode()
-	return parsed.String(), nil
-}
-
 func buildWSURL(baseURL string, symbols []string, chartSymbol string) string {
 	streams := make([]string, 0, len(symbols))
 	for _, symbol := range symbols {
@@ -861,12 +711,12 @@ func buildWSURL(baseURL string, symbols []string, chartSymbol string) string {
 	return baseURL + "/stream?streams=" + strings.Join(streams, "/")
 }
 
-func newAppState(symbols []string, mode string) *appState {
+func newAppState(symbols []string) *appState {
 	rows := make(map[string]rowState, len(symbols))
 	for _, symbol := range symbols {
 		rows[symbol] = rowState{Symbol: symbol, Status: "waiting"}
 	}
-	return &appState{rows: rows, startedAt: time.Now(), mode: mode}
+	return &appState{rows: rows, startedAt: time.Now()}
 }
 
 func (s *appState) setChart(symbol string, candles []klineCandle) {
@@ -967,7 +817,7 @@ func (s *appState) clearError() {
 	s.lastError = ""
 }
 
-func (s *appState) snapshot() ([]rowState, []klineCandle, string, string, time.Time, time.Time, string) {
+func (s *appState) snapshot() ([]rowState, []klineCandle, string, string, time.Time, time.Time) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -978,7 +828,7 @@ func (s *appState) snapshot() ([]rowState, []klineCandle, string, string, time.T
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Symbol < rows[j].Symbol })
 
 	chart := append([]klineCandle(nil), s.chart...)
-	return rows, chart, s.chartSymbol, s.lastError, s.startedAt, s.lastUpdate, s.mode
+	return rows, chart, s.chartSymbol, s.lastError, s.startedAt, s.lastUpdate
 }
 
 func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int)) *uiModel {
@@ -1165,11 +1015,10 @@ func (ui *uiModel) requestDraw() {
 }
 
 func (ui *uiModel) refresh() {
-	rows, chart, chartSymbol, lastError, startedAt, lastUpdate, mode := ui.state.snapshot()
+	rows, chart, chartSymbol, lastError, startedAt, lastUpdate := ui.state.snapshot()
 
 	ui.header.SetText(fmt.Sprintf(
-		"mode: %s\nsymbols: %s\nconfig: %s\nnow: %s\nstarted: %s\nlast update: %s",
-		mode,
+		"mode: ws\nsymbols: %s\nconfig: %s\nnow: %s\nstarted: %s\nlast update: %s",
 		strings.Join(ui.cfg.Symbols, ","),
 		ui.cfg.ConfigPath,
 		formatTime(time.Now(), ui.loc, false),
@@ -1181,12 +1030,7 @@ func (ui *uiModel) refresh() {
 	if lastError != "" {
 		statusText = ui.colorize("red", lastError)
 	}
-	transport := fmt.Sprintf("mode=%s | timeout=%s", mode, ui.cfg.Timeout)
-	if mode == "poll" {
-		transport = fmt.Sprintf("poll interval=%s | rest=%s", ui.cfg.Interval, ui.cfg.RESTBase)
-	} else {
-		transport = fmt.Sprintf("retry delay=%s | ws=%s", ui.cfg.RetryDelay, ui.cfg.WSBase)
-	}
+	transport := fmt.Sprintf("retry delay=%s | ws=%s | rest=%s", ui.cfg.RetryDelay, ui.cfg.WSBase, ui.cfg.RESTBase)
 	ui.status.SetText(fmt.Sprintf("status: %s\n%s", statusText, transport))
 
 	ui.renderTable(rows)
@@ -1259,8 +1103,8 @@ func escapeTView(text string) string {
 }
 
 func printSnapshot(cfg config, loc *time.Location, state *appState) {
-	rows, chart, chartSymbol, lastError, startedAt, lastUpdate, mode := state.snapshot()
-	fmt.Printf("mode: %s\nsymbols: %s\nconfig: %s\nstarted: %s\nlast update: %s\n", mode, strings.Join(cfg.Symbols, ","), cfg.ConfigPath, formatTime(startedAt, loc, false), formatOptionalTime(lastUpdate, loc))
+	rows, chart, chartSymbol, lastError, startedAt, lastUpdate := state.snapshot()
+	fmt.Printf("mode: ws\nsymbols: %s\nconfig: %s\nstarted: %s\nlast update: %s\n", strings.Join(cfg.Symbols, ","), cfg.ConfigPath, formatTime(startedAt, loc, false), formatOptionalTime(lastUpdate, loc))
 	if lastError == "" {
 		fmt.Println("status: ok")
 	} else {
