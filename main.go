@@ -34,6 +34,9 @@ const (
 	uiRefreshInterval  = time.Second
 	defaultChartLimit  = 48
 	defaultChartHeight = 12
+	bullColorTag       = "#00c853"
+	bearColorTag       = "#e53935"
+	neutralColorTag    = "#9aa0a6"
 )
 
 type config struct {
@@ -1095,11 +1098,11 @@ func (ui *uiModel) colorByChange(change int, text string) string {
 	}
 	switch {
 	case change > 0:
-		return fmt.Sprintf("[green]%s[-]", escapeTView(text))
+		return fmt.Sprintf("[%s]%s[-]", bullColorTag, escapeTView(text))
 	case change < 0:
-		return fmt.Sprintf("[red]%s[-]", escapeTView(text))
+		return fmt.Sprintf("[%s]%s[-]", bearColorTag, escapeTView(text))
 	default:
-		return fmt.Sprintf("[gray]%s[-]", escapeTView(text))
+		return fmt.Sprintf("[%s]%s[-]", neutralColorTag, escapeTView(text))
 	}
 }
 
@@ -1154,10 +1157,11 @@ func buildChartText(candles []klineCandle, noColor bool) string {
 		span = 1
 	}
 
+	chartWidth := len(candles)
 	rows := make([][]string, defaultChartHeight)
 	for y := 0; y < defaultChartHeight; y++ {
-		rows[y] = make([]string, len(candles))
-		for x := range candles {
+		rows[y] = make([]string, chartWidth)
+		for x := range rows[y] {
 			rows[y][x] = " "
 		}
 	}
@@ -1168,18 +1172,19 @@ func buildChartText(candles []klineCandle, noColor bool) string {
 		openY := scaleValue(candle.OpenValue, low, span)
 		closeY := scaleValue(candle.CloseValue, low, span)
 
+		color := bullColorTag
+		if candle.CloseValue < candle.OpenValue {
+			color = bearColorTag
+		} else if candle.CloseValue == candle.OpenValue {
+			color = neutralColorTag
+		}
+
 		upper := minInt(openY, closeY)
 		lower := maxInt(openY, closeY)
 		for y := highY; y <= lowY; y++ {
-			rows[y][x] = uiGlyph("│", noColor, "gray")
+			rows[y][x] = uiGlyph("│", noColor, color)
 		}
 		for y := upper; y <= lower; y++ {
-			color := "green"
-			if candle.CloseValue < candle.OpenValue {
-				color = "red"
-			} else if candle.CloseValue == candle.OpenValue {
-				color = "gray"
-			}
 			rows[y][x] = uiGlyph("█", noColor, color)
 		}
 	}
@@ -1229,7 +1234,7 @@ func maxInt(a, b int) int {
 }
 
 func stripTViewTags(text string) string {
-	replacer := strings.NewReplacer("[green]", "", "[red]", "", "[gray]", "", "[-]", "")
+	replacer := strings.NewReplacer("["+bullColorTag+"]", "", "["+bearColorTag+"]", "", "["+neutralColorTag+"]", "", "[-]", "")
 	return replacer.Replace(text)
 }
 
