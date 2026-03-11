@@ -10,6 +10,7 @@
 - 基于 `tview/tcell` 的稳定 TUI 表格界面，不会一直滚屏
 - 价格上涨显示绿色，下跌显示红色，持平显示灰色
 - 显示当前时间、交易所时间、最近更新时间
+- 支持生成并实时刷新 1 小时 K 线图
 - 支持自定义时区，默认 `Asia/Shanghai`
 
 ## 运行
@@ -45,6 +46,12 @@ WebSocket 实时订阅：
 go run . -mode ws -symbols ETHUSDT,BTCUSDT,SOLUSDT
 ```
 
+指定图表 symbol，并显示最近 72 根 1 小时 K 线：
+
+```bash
+go run . -mode ws -symbols ETHUSDT,BTCUSDT,SOLUSDT -chart-symbol ETHUSDT -chart-limit 72
+```
+
 按 `q` 或 `Ctrl+C` 退出 TUI。
 
 关闭颜色输出：
@@ -65,6 +72,8 @@ go build -o ticker .
 - `-symbols`：逗号分隔的合约列表，默认 `ETHUSDT`
 - `-mode`：数据模式，`poll` 或 `ws`，默认 `ws`
 - `-interval`：轮询模式请求间隔，默认 `3s`
+- `-chart-symbol`：1 小时 K 线图使用的 symbol，默认取 `-symbols` 的第一个
+- `-chart-limit`：1 小时 K 线数量，默认 `48`
 - `-timeout`：HTTP 请求超时 / WebSocket 连接超时，默认 `8s`
 - `-retry-delay`：WebSocket 断线重连等待时间，默认 `2s`
 - `-tz`：终端输出时区，默认 `Asia/Shanghai`
@@ -79,6 +88,7 @@ go build -o ticker .
 - `DELTA`：相对上一次更新的变化值和变化百分比
 - `EXCHANGE_TIME`：交易所返回时间
 - `LOCAL_UPDATE`：本地收到更新的时间
+- 右侧 `1H Chart`：最近若干根 1 小时 K 线，先拉历史，再随 WebSocket 实时更新
 
 ## 说明
 

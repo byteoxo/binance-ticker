@@ -28,21 +28,26 @@ const (
 	defaultRESTBaseURL = "https://fapi.binance.com"
 	defaultWSBaseURL   = "wss://fstream.binance.com"
 	tickerPath         = "/fapi/v2/ticker/price"
+	klinePath          = "/fapi/v1/klines"
 	defaultTimeout     = 8 * time.Second
 	uiRefreshInterval  = time.Second
+	defaultChartLimit  = 48
+	defaultChartHeight = 12
 )
 
 type config struct {
-	Symbols    []string
-	Interval   time.Duration
-	Timeout    time.Duration
-	TZ         string
-	RESTBase   string
-	WSBase     string
-	Mode       string
-	Once       bool
-	NoColor    bool
-	RetryDelay time.Duration
+	Symbols     []string
+	ChartSymbol string
+	ChartLimit  int
+	Interval    time.Duration
+	Timeout     time.Duration
+	TZ          string
+	RESTBase    string
+	WSBase      string
+	Mode        string
+	Once        bool
+	NoColor     bool
+	RetryDelay  time.Duration
 }
 
 type priceTicker struct {
@@ -56,7 +61,24 @@ type wsEnvelope struct {
 	Data   json.RawMessage `json:"data"`
 }
 
+type wsKlineEnvelope struct {
+	Symbol string         `json:"s"`
+	Kline  wsKlinePayload `json:"k"`
+}
+
+type wsKlinePayload struct {
+	StartTime jsonFlexibleInt64  `json:"t"`
+	CloseTime jsonFlexibleInt64  `json:"T"`
+	Open      jsonFlexibleString `json:"o"`
+	High      jsonFlexibleString `json:"h"`
+	Low       jsonFlexibleString `json:"l"`
+	Close     jsonFlexibleString `json:"c"`
+	IsClosed  bool               `json:"x"`
+}
+
 type jsonFlexibleInt64 int64
+
+type jsonFlexibleString string
 
 func (v *jsonFlexibleInt64) UnmarshalJSON(data []byte) error {
 	if len(data) == 0 || string(data) == "null" {
@@ -84,6 +106,29 @@ func (v *jsonFlexibleInt64) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+func (v *jsonFlexibleString) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		*v = ""
+		return nil
+	}
+
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*v = jsonFlexibleString(text)
+		return nil
+	}
+
+	var number json.Number
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&number); err != nil {
+		return err
+	}
+
+	*v = jsonFlexibleString(number.String())
+	return nil
+}
+
 type rowState struct {
 	Symbol       string
 	Price        string
@@ -99,13 +144,29 @@ type rowState struct {
 	Status       string
 }
 
+type klineCandle struct {
+	OpenTime   int64
+	CloseTime  int64
+	Open       string
+	High       string
+	Low        string
+	Close      string
+	OpenValue  float64
+	HighValue  float64
+	LowValue   float64
+	CloseValue float64
+	Closed     bool
+}
+
 type appState struct {
-	mu         sync.RWMutex
-	rows       map[string]rowState
-	startedAt  time.Time
-	lastError  string
-	lastUpdate time.Time
-	mode       string
+	mu          sync.RWMutex
+	rows        map[string]rowState
+	chart       []klineCandle
+	chartSymbol string
+	startedAt   time.Time
+	lastError   string
+	lastUpdate  time.Time
+	mode        string
 }
 
 type uiModel struct {
@@ -113,6 +174,7 @@ type uiModel struct {
 	header *tview.TextView
 	status *tview.TextView
 	table  *tview.Table
+	chart  *tview.TextView
 	footer *tview.TextView
 	cfg    config
 	loc    *time.Location
@@ -138,6 +200,8 @@ func main() {
 
 func parseFlags() config {
 	symbolsFlag := flag.String("symbols", "ETHUSDT", "Comma-separated Binance USD-M futures symbols, e.g. ETHUSDT,BTCUSDT")
+	chartSymbolFlag := flag.String("chart-symbol", "", "Symbol for the 1h kline chart; defaults to the first item in -symbols")
+	chartLimitFlag := flag.Int("chart-limit", defaultChartLimit, "Number of 1h candles to load for the chart")
 	intervalFlag := flag.Duration("interval", 3*time.Second, "Polling interval for poll mode, e.g. 1s, 1500ms, 5s")
 	timeoutFlag := flag.Duration("timeout", defaultTimeout, "HTTP/WebSocket dial timeout")
 	tzFlag := flag.String("tz", "Asia/Shanghai", "IANA timezone name for terminal output, e.g. Asia/Shanghai")
@@ -158,13 +222,16 @@ func parseFlags() config {
 	if *retryDelayFlag <= 0 {
 		log.Fatal("fatal: -retry-delay must be greater than 0")
 	}
+	if *chartLimitFlag <= 0 {
+		log.Fatal("fatal: -chart-limit must be greater than 0")
+	}
 
 	mode := strings.ToLower(strings.TrimSpace(*modeFlag))
 	if mode != "poll" && mode != "ws" {
 		log.Fatal("fatal: -mode must be either poll or ws")
 	}
-	if *onceFlag && mode != "poll" {
-		log.Fatal("fatal: -once is only supported in poll mode")
+	if *onceFlag {
+		mode = "poll"
 	}
 
 	symbols := normalizeSymbols(*symbolsFlag)
@@ -172,21 +239,32 @@ func parseFlags() config {
 		log.Fatal("fatal: at least one symbol is required")
 	}
 
+	chartSymbol := strings.ToUpper(strings.TrimSpace(*chartSymbolFlag))
+	if chartSymbol == "" {
+		chartSymbol = symbols[0]
+	}
+
 	return config{
-		Symbols:    symbols,
-		Interval:   *intervalFlag,
-		Timeout:    *timeoutFlag,
-		TZ:         *tzFlag,
-		RESTBase:   strings.TrimRight(*restBaseFlag, "/"),
-		WSBase:     strings.TrimRight(*wsBaseFlag, "/"),
-		Mode:       mode,
-		Once:       *onceFlag,
-		NoColor:    *noColorFlag || os.Getenv("NO_COLOR") != "",
-		RetryDelay: *retryDelayFlag,
+		Symbols:     symbols,
+		ChartSymbol: chartSymbol,
+		ChartLimit:  *chartLimitFlag,
+		Interval:    *intervalFlag,
+		Timeout:     *timeoutFlag,
+		TZ:          *tzFlag,
+		RESTBase:    strings.TrimRight(*restBaseFlag, "/"),
+		WSBase:      strings.TrimRight(*wsBaseFlag, "/"),
+		Mode:        mode,
+		Once:        *onceFlag,
+		NoColor:     *noColorFlag || os.Getenv("NO_COLOR") != "",
+		RetryDelay:  *retryDelayFlag,
 	}
 }
 
 func run(ctx context.Context, client *http.Client, cfg config, loc *time.Location, state *appState) error {
+	if err := loadChartHistory(ctx, client, cfg, state); err != nil {
+		state.setError(fmt.Sprintf("chart init failed: %v", err))
+	}
+
 	if cfg.Once {
 		if err := runPollOnce(ctx, client, cfg, state); err != nil {
 			return err
@@ -297,7 +375,7 @@ func runWSLoop(ctx context.Context, cfg config, state *appState, notify func()) 
 }
 
 func consumeWS(ctx context.Context, cfg config, state *appState, notify func()) error {
-	endpoint := buildWSURL(cfg.WSBase, cfg.Symbols)
+	endpoint := buildWSURL(cfg.WSBase, cfg.Symbols, cfg.ChartSymbol)
 	dialer := websocket.Dialer{HandshakeTimeout: cfg.Timeout}
 	conn, _, err := dialer.DialContext(ctx, endpoint, nil)
 	if err != nil {
@@ -327,14 +405,24 @@ func consumeWS(ctx context.Context, cfg config, state *appState, notify func()) 
 				return
 			}
 
-			ticker, err := parseWSTicker(envelope.Data)
-			if err != nil {
-				readErrCh <- fmt.Errorf("decode websocket payload: %w", err)
-				return
+			switch {
+			case strings.HasSuffix(envelope.Stream, "@ticker"):
+				ticker, err := parseWSTicker(envelope.Data)
+				if err != nil {
+					readErrCh <- fmt.Errorf("decode websocket ticker payload: %w", err)
+					return
+				}
+				state.applyTicker(ticker)
+				notify()
+			case strings.HasSuffix(envelope.Stream, "@kline_1h"):
+				candle, err := parseWSKline(envelope.Data)
+				if err != nil {
+					readErrCh <- fmt.Errorf("decode websocket kline payload: %w", err)
+					return
+				}
+				state.applyChartCandle(candle, cfg.ChartLimit)
+				notify()
 			}
-
-			state.applyTicker(ticker)
-			notify()
 		}
 	}()
 
@@ -393,6 +481,173 @@ func parseWSTicker(data []byte) (priceTicker, error) {
 	}
 
 	return priceTicker{Symbol: symbol, Price: price, Time: int64(eventTime)}, nil
+}
+
+func parseWSKline(data []byte) (klineCandle, error) {
+	var payload wsKlineEnvelope
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return klineCandle{}, err
+	}
+
+	return newKlineCandle(
+		int64(payload.Kline.StartTime),
+		int64(payload.Kline.CloseTime),
+		string(payload.Kline.Open),
+		string(payload.Kline.High),
+		string(payload.Kline.Low),
+		string(payload.Kline.Close),
+		payload.Kline.IsClosed,
+	)
+}
+
+func loadChartHistory(ctx context.Context, client *http.Client, cfg config, state *appState) error {
+	klines, err := fetchKlines(ctx, client, cfg.RESTBase, cfg.ChartSymbol, cfg.ChartLimit)
+	if err != nil {
+		return err
+	}
+	state.setChart(cfg.ChartSymbol, klines)
+	return nil
+}
+
+func fetchKlines(ctx context.Context, client *http.Client, baseURL, symbol string, limit int) ([]klineCandle, error) {
+	endpoint, err := buildKlineURL(baseURL, symbol, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status: %s", resp.Status)
+	}
+
+	var raw [][]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, fmt.Errorf("decode kline response: %w", err)
+	}
+
+	klines := make([]klineCandle, 0, len(raw))
+	for _, item := range raw {
+		candle, err := parseRESTKline(item)
+		if err != nil {
+			return nil, err
+		}
+		klines = append(klines, candle)
+	}
+
+	return klines, nil
+}
+
+func buildKlineURL(baseURL, symbol string, limit int) (string, error) {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("parse base url: %w", err)
+	}
+	parsed.Path = klinePath
+
+	query := url.Values{}
+	query.Set("symbol", symbol)
+	query.Set("interval", "1h")
+	query.Set("limit", strconv.Itoa(limit))
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
+}
+
+func parseRESTKline(item []interface{}) (klineCandle, error) {
+	if len(item) < 7 {
+		return klineCandle{}, fmt.Errorf("invalid kline length: %d", len(item))
+	}
+
+	openTime, err := interfaceToInt64(item[0])
+	if err != nil {
+		return klineCandle{}, err
+	}
+	open, err := interfaceToString(item[1])
+	if err != nil {
+		return klineCandle{}, err
+	}
+	high, err := interfaceToString(item[2])
+	if err != nil {
+		return klineCandle{}, err
+	}
+	low, err := interfaceToString(item[3])
+	if err != nil {
+		return klineCandle{}, err
+	}
+	closePrice, err := interfaceToString(item[4])
+	if err != nil {
+		return klineCandle{}, err
+	}
+	closeTime, err := interfaceToInt64(item[6])
+	if err != nil {
+		return klineCandle{}, err
+	}
+
+	return newKlineCandle(openTime, closeTime, open, high, low, closePrice, true)
+}
+
+func newKlineCandle(openTime, closeTime int64, open, high, low, closePrice string, closed bool) (klineCandle, error) {
+	openValue, err := strconv.ParseFloat(open, 64)
+	if err != nil {
+		return klineCandle{}, err
+	}
+	highValue, err := strconv.ParseFloat(high, 64)
+	if err != nil {
+		return klineCandle{}, err
+	}
+	lowValue, err := strconv.ParseFloat(low, 64)
+	if err != nil {
+		return klineCandle{}, err
+	}
+	closeValue, err := strconv.ParseFloat(closePrice, 64)
+	if err != nil {
+		return klineCandle{}, err
+	}
+
+	return klineCandle{
+		OpenTime:   openTime,
+		CloseTime:  closeTime,
+		Open:       open,
+		High:       high,
+		Low:        low,
+		Close:      closePrice,
+		OpenValue:  openValue,
+		HighValue:  highValue,
+		LowValue:   lowValue,
+		CloseValue: closeValue,
+		Closed:     closed,
+	}, nil
+}
+
+func interfaceToInt64(value interface{}) (int64, error) {
+	switch v := value.(type) {
+	case float64:
+		return int64(v), nil
+	case string:
+		return strconv.ParseInt(v, 10, 64)
+	default:
+		return 0, fmt.Errorf("unsupported integer value %T", value)
+	}
+}
+
+func interfaceToString(value interface{}) (string, error) {
+	switch v := value.(type) {
+	case string:
+		return v, nil
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64), nil
+	default:
+		return "", fmt.Errorf("unsupported string value %T", value)
+	}
 }
 
 func fetchPrices(ctx context.Context, client *http.Client, baseURL string, symbols []string) ([]priceTicker, error) {
@@ -472,10 +727,13 @@ func buildRESTURL(baseURL, symbol string) (string, error) {
 	return parsed.String(), nil
 }
 
-func buildWSURL(baseURL string, symbols []string) string {
+func buildWSURL(baseURL string, symbols []string, chartSymbol string) string {
 	streams := make([]string, 0, len(symbols))
 	for _, symbol := range symbols {
 		streams = append(streams, strings.ToLower(symbol)+"@ticker")
+	}
+	if chartSymbol != "" {
+		streams = append(streams, strings.ToLower(chartSymbol)+"@kline_1h")
 	}
 	return baseURL + "/stream?streams=" + strings.Join(streams, "/")
 }
@@ -486,6 +744,34 @@ func newAppState(symbols []string, mode string) *appState {
 		rows[symbol] = rowState{Symbol: symbol, Status: "waiting"}
 	}
 	return &appState{rows: rows, startedAt: time.Now(), mode: mode}
+}
+
+func (s *appState) setChart(symbol string, candles []klineCandle) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.chartSymbol = symbol
+	s.chart = append([]klineCandle(nil), candles...)
+	if !s.lastUpdate.IsZero() {
+		return
+	}
+	s.lastUpdate = time.Now()
+}
+
+func (s *appState) applyChartCandle(candle klineCandle, limit int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit <= 0 {
+		limit = defaultChartLimit
+	}
+	if len(s.chart) > 0 && s.chart[len(s.chart)-1].OpenTime == candle.OpenTime {
+		s.chart[len(s.chart)-1] = candle
+	} else {
+		s.chart = append(s.chart, candle)
+		if len(s.chart) > limit {
+			s.chart = append([]klineCandle(nil), s.chart[len(s.chart)-limit:]...)
+		}
+	}
+	s.lastUpdate = time.Now()
 }
 
 func (s *appState) applyTickers(tickers []priceTicker) {
@@ -558,7 +844,7 @@ func (s *appState) clearError() {
 	s.lastError = ""
 }
 
-func (s *appState) snapshot() ([]rowState, string, time.Time, time.Time, string) {
+func (s *appState) snapshot() ([]rowState, []klineCandle, string, string, time.Time, time.Time, string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -568,7 +854,8 @@ func (s *appState) snapshot() ([]rowState, string, time.Time, time.Time, string)
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Symbol < rows[j].Symbol })
 
-	return rows, s.lastError, s.startedAt, s.lastUpdate, s.mode
+	chart := append([]klineCandle(nil), s.chart...)
+	return rows, chart, s.chartSymbol, s.lastError, s.startedAt, s.lastUpdate, s.mode
 }
 
 func newUI(cfg config, loc *time.Location, state *appState) *uiModel {
@@ -589,19 +876,22 @@ func newUI(cfg config, loc *time.Location, state *appState) *uiModel {
 	header := tview.NewTextView().SetDynamicColors(true)
 	status := tview.NewTextView().SetDynamicColors(true)
 	table := tview.NewTable().SetBorders(false).SetSelectable(false, false).SetFixed(1, 0)
+	chart := tview.NewTextView().SetDynamicColors(true)
 	footer := tview.NewTextView().SetDynamicColors(true)
 
 	header.SetBackgroundColor(tcell.ColorDefault)
 	status.SetBackgroundColor(tcell.ColorDefault)
 	table.SetBackgroundColor(tcell.ColorDefault)
+	chart.SetBackgroundColor(tcell.ColorDefault)
 	footer.SetBackgroundColor(tcell.ColorDefault)
 	header.SetBorder(true).SetTitle("Overview")
 	status.SetBorder(true).SetTitle("Status")
 	table.SetBorder(true).SetTitle("Contracts")
+	chart.SetBorder(true).SetTitle("1H Chart")
 	footer.SetBorder(true)
 	footer.SetText("q / Ctrl+C to quit")
 
-	ui := &uiModel{app: app, header: header, status: status, table: table, footer: footer, cfg: cfg, loc: loc, state: state}
+	ui := &uiModel{app: app, header: header, status: status, table: table, chart: chart, footer: footer, cfg: cfg, loc: loc, state: state}
 	ui.refresh()
 
 	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
@@ -622,10 +912,14 @@ func newUI(cfg config, loc *time.Location, state *appState) *uiModel {
 }
 
 func (ui *uiModel) layout() tview.Primitive {
+	body := tview.NewFlex().SetDirection(tview.FlexColumn).
+		AddItem(ui.table, 0, 3, false).
+		AddItem(ui.chart, 0, 2, false)
+
 	content := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(ui.header, 5, 0, false).
 		AddItem(ui.status, 4, 0, false).
-		AddItem(ui.table, 0, 1, false).
+		AddItem(body, 0, 1, false).
 		AddItem(ui.footer, 3, 0, false)
 	return content
 }
@@ -650,7 +944,7 @@ func (ui *uiModel) requestDraw() {
 }
 
 func (ui *uiModel) refresh() {
-	rows, lastError, startedAt, lastUpdate, mode := ui.state.snapshot()
+	rows, chart, chartSymbol, lastError, startedAt, lastUpdate, mode := ui.state.snapshot()
 
 	ui.header.SetText(fmt.Sprintf(
 		"mode: %s\nsymbols: %s\nnow: %s\nstarted: %s\nlast update: %s",
@@ -674,6 +968,7 @@ func (ui *uiModel) refresh() {
 	ui.status.SetText(fmt.Sprintf("status: %s\n%s", statusText, transport))
 
 	ui.renderTable(rows)
+	ui.renderChart(chart, chartSymbol)
 }
 
 func (ui *uiModel) renderTable(rows []rowState) {
@@ -707,6 +1002,14 @@ func (ui *uiModel) renderTable(rows []rowState) {
 	}
 }
 
+func (ui *uiModel) renderChart(candles []klineCandle, symbol string) {
+	if symbol == "" {
+		symbol = ui.cfg.ChartSymbol
+	}
+	ui.chart.SetTitle(fmt.Sprintf("1H Chart - %s", symbol))
+	ui.chart.SetText(buildChartText(candles, ui.cfg.NoColor))
+}
+
 func (ui *uiModel) colorize(color, text string) string {
 	if ui.cfg.NoColor {
 		return text
@@ -734,7 +1037,7 @@ func escapeTView(text string) string {
 }
 
 func printSnapshot(cfg config, loc *time.Location, state *appState) {
-	rows, lastError, startedAt, lastUpdate, mode := state.snapshot()
+	rows, chart, chartSymbol, lastError, startedAt, lastUpdate, mode := state.snapshot()
 	fmt.Printf("mode: %s\nsymbols: %s\nstarted: %s\nlast update: %s\n", mode, strings.Join(cfg.Symbols, ","), formatTime(startedAt, loc, false), formatOptionalTime(lastUpdate, loc))
 	if lastError == "" {
 		fmt.Println("status: ok")
@@ -749,6 +1052,113 @@ func printSnapshot(cfg config, loc *time.Location, state *appState) {
 		}
 		fmt.Printf("%-14s %-18s %-18s %-26s %-26s\n", row.Symbol, price, formatDelta(row), formatEpoch(row.ExchangeTime, loc), formatOptionalTime(row.LocalTime, loc))
 	}
+	if len(chart) > 0 {
+		fmt.Printf("\n1H chart (%s):\n%s\n", chartSymbol, stripTViewTags(buildChartText(chart, true)))
+	}
+}
+
+func buildChartText(candles []klineCandle, noColor bool) string {
+	if len(candles) == 0 {
+		return "waiting for 1h kline data..."
+	}
+
+	if len(candles) > defaultChartLimit {
+		candles = candles[len(candles)-defaultChartLimit:]
+	}
+
+	high := candles[0].HighValue
+	low := candles[0].LowValue
+	for _, candle := range candles {
+		if candle.HighValue > high {
+			high = candle.HighValue
+		}
+		if candle.LowValue < low {
+			low = candle.LowValue
+		}
+	}
+
+	span := high - low
+	if span == 0 {
+		span = 1
+	}
+
+	rows := make([][]string, defaultChartHeight)
+	for y := 0; y < defaultChartHeight; y++ {
+		rows[y] = make([]string, len(candles))
+		for x := range candles {
+			rows[y][x] = " "
+		}
+	}
+
+	for x, candle := range candles {
+		highY := scaleValue(candle.HighValue, low, span)
+		lowY := scaleValue(candle.LowValue, low, span)
+		openY := scaleValue(candle.OpenValue, low, span)
+		closeY := scaleValue(candle.CloseValue, low, span)
+
+		upper := minInt(openY, closeY)
+		lower := maxInt(openY, closeY)
+		for y := highY; y <= lowY; y++ {
+			rows[y][x] = uiGlyph("│", noColor, "gray")
+		}
+		for y := upper; y <= lower; y++ {
+			color := "green"
+			if candle.CloseValue < candle.OpenValue {
+				color = "red"
+			} else if candle.CloseValue == candle.OpenValue {
+				color = "gray"
+			}
+			rows[y][x] = uiGlyph("█", noColor, color)
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("high %.2f\n", high))
+	for _, row := range rows {
+		b.WriteString(strings.Join(row, ""))
+		b.WriteString("\n")
+	}
+	b.WriteString(fmt.Sprintf("low  %.2f\n", low))
+	b.WriteString(fmt.Sprintf("last close %.2f | candles %d", candles[len(candles)-1].CloseValue, len(candles)))
+	return b.String()
+}
+
+func uiGlyph(glyph string, noColor bool, color string) string {
+	if noColor {
+		return glyph
+	}
+	return fmt.Sprintf("[%s]%s[-]", color, glyph)
+}
+
+func scaleValue(value, low, span float64) int {
+	normalized := (value - low) / span
+	index := defaultChartHeight - 1 - int(math.Round(normalized*float64(defaultChartHeight-1)))
+	if index < 0 {
+		return 0
+	}
+	if index >= defaultChartHeight {
+		return defaultChartHeight - 1
+	}
+	return index
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func stripTViewTags(text string) string {
+	replacer := strings.NewReplacer("[green]", "", "[red]", "", "[gray]", "", "[-]", "")
+	return replacer.Replace(text)
 }
 
 func formatDelta(row rowState) string {
