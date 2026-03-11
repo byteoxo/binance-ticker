@@ -1,6 +1,6 @@
 binance-futures-ticker
+config.toml
 *.exe
 *.test
 *.out
 .DS_Store
-

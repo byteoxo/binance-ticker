@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"log"
 	"math"
@@ -12,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/gdamore/tcell/v2"
 	"github.com/gorilla/websocket"
 	"github.com/rivo/tview"
@@ -48,6 +49,22 @@ type config struct {
 	Once        bool
 	NoColor     bool
 	RetryDelay  time.Duration
+	ConfigPath  string
+}
+
+type rawConfig struct {
+	Symbols     []string `toml:"symbols"`
+	ChartSymbol string   `toml:"chart_symbol"`
+	ChartLimit  int      `toml:"chart_limit"`
+	Interval    string   `toml:"interval"`
+	Timeout     string   `toml:"timeout"`
+	TZ          string   `toml:"tz"`
+	RESTBase    string   `toml:"rest_base"`
+	WSBase      string   `toml:"ws_base"`
+	Mode        string   `toml:"mode"`
+	Once        bool     `toml:"once"`
+	NoColor     bool     `toml:"no_color"`
+	RetryDelay  string   `toml:"retry_delay"`
 }
 
 type priceTicker struct {
@@ -185,7 +202,7 @@ func main() {
 	log.SetFlags(0)
 	log.SetPrefix("")
 
-	cfg := parseFlags()
+	cfg := mustLoadConfig()
 	loc := mustLoadLocation(cfg.TZ)
 	client := &http.Client{Timeout: cfg.Timeout}
 	state := newAppState(cfg.Symbols, cfg.Mode)
@@ -198,66 +215,121 @@ func main() {
 	}
 }
 
-func parseFlags() config {
-	symbolsFlag := flag.String("symbols", "ETHUSDT", "Comma-separated Binance USD-M futures symbols, e.g. ETHUSDT,BTCUSDT")
-	chartSymbolFlag := flag.String("chart-symbol", "", "Symbol for the 1h kline chart; defaults to the first item in -symbols")
-	chartLimitFlag := flag.Int("chart-limit", defaultChartLimit, "Number of 1h candles to load for the chart")
-	intervalFlag := flag.Duration("interval", 3*time.Second, "Polling interval for poll mode, e.g. 1s, 1500ms, 5s")
-	timeoutFlag := flag.Duration("timeout", defaultTimeout, "HTTP/WebSocket dial timeout")
-	tzFlag := flag.String("tz", "Asia/Shanghai", "IANA timezone name for terminal output, e.g. Asia/Shanghai")
-	restBaseFlag := flag.String("base-url", defaultRESTBaseURL, "Binance Futures REST API base URL")
-	wsBaseFlag := flag.String("ws-base-url", defaultWSBaseURL, "Binance Futures WebSocket base URL")
-	modeFlag := flag.String("mode", "ws", "Data source mode: poll or ws")
-	onceFlag := flag.Bool("once", false, "Fetch once and print a single snapshot")
-	noColorFlag := flag.Bool("no-color", false, "Disable color output in TUI")
-	retryDelayFlag := flag.Duration("retry-delay", 2*time.Second, "Reconnect delay for ws mode")
-	flag.Parse()
 
-	if *intervalFlag <= 0 {
-		log.Fatal("fatal: -interval must be greater than 0")
+func mustLoadConfig() config {
+	cfg, err := loadConfig()
+	if err != nil {
+		log.Fatalf("fatal: %v", err)
 	}
-	if *timeoutFlag <= 0 {
-		log.Fatal("fatal: -timeout must be greater than 0")
-	}
-	if *retryDelayFlag <= 0 {
-		log.Fatal("fatal: -retry-delay must be greater than 0")
-	}
-	if *chartLimitFlag <= 0 {
-		log.Fatal("fatal: -chart-limit must be greater than 0")
+	return cfg
+}
+
+func loadConfig() (config, error) {
+	path, err := resolveConfigPath()
+	if err != nil {
+		return config{}, err
 	}
 
-	mode := strings.ToLower(strings.TrimSpace(*modeFlag))
-	if mode != "poll" && mode != "ws" {
-		log.Fatal("fatal: -mode must be either poll or ws")
-	}
-	if *onceFlag {
-		mode = "poll"
+	var raw rawConfig
+	meta, err := toml.DecodeFile(path, &raw)
+	if err != nil {
+		return config{}, fmt.Errorf("decode config %s: %w", path, err)
 	}
 
-	symbols := normalizeSymbols(*symbolsFlag)
+	required := []string{"symbols", "chart_symbol", "chart_limit", "interval", "timeout", "tz", "rest_base", "ws_base", "mode", "once", "no_color", "retry_delay"}
+	for _, key := range required {
+		if !meta.IsDefined(key) {
+			return config{}, fmt.Errorf("config %s missing required field %q", path, key)
+		}
+	}
+
+	symbols := normalizeSymbols(strings.Join(raw.Symbols, ","))
 	if len(symbols) == 0 {
-		log.Fatal("fatal: at least one symbol is required")
+		return config{}, fmt.Errorf("config %s has no valid symbols", path)
 	}
 
-	chartSymbol := strings.ToUpper(strings.TrimSpace(*chartSymbolFlag))
+	chartSymbol := strings.ToUpper(strings.TrimSpace(raw.ChartSymbol))
 	if chartSymbol == "" {
-		chartSymbol = symbols[0]
+		return config{}, fmt.Errorf("config %s field %q cannot be empty", path, "chart_symbol")
+	}
+	chartLimit := raw.ChartLimit
+	if chartLimit <= 0 {
+		return config{}, fmt.Errorf("config %s field %q must be greater than 0", path, "chart_limit")
+	}
+
+	interval, err := time.ParseDuration(strings.TrimSpace(raw.Interval))
+	if err != nil || interval <= 0 {
+		return config{}, fmt.Errorf("config %s field %q must be a valid positive duration", path, "interval")
+	}
+	timeout, err := time.ParseDuration(strings.TrimSpace(raw.Timeout))
+	if err != nil || timeout <= 0 {
+		return config{}, fmt.Errorf("config %s field %q must be a valid positive duration", path, "timeout")
+	}
+	retryDelay, err := time.ParseDuration(strings.TrimSpace(raw.RetryDelay))
+	if err != nil || retryDelay <= 0 {
+		return config{}, fmt.Errorf("config %s field %q must be a valid positive duration", path, "retry_delay")
+	}
+
+	tz := strings.TrimSpace(raw.TZ)
+	if tz == "" {
+		return config{}, fmt.Errorf("config %s field %q cannot be empty", path, "tz")
+	}
+	restBase := strings.TrimRight(strings.TrimSpace(raw.RESTBase), "/")
+	if restBase == "" {
+		return config{}, fmt.Errorf("config %s field %q cannot be empty", path, "rest_base")
+	}
+	wsBase := strings.TrimRight(strings.TrimSpace(raw.WSBase), "/")
+	if wsBase == "" {
+		return config{}, fmt.Errorf("config %s field %q cannot be empty", path, "ws_base")
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(raw.Mode))
+	if mode != "poll" && mode != "ws" {
+		return config{}, fmt.Errorf("config %s field %q must be either poll or ws", path, "mode")
+	}
+	if raw.Once {
+		mode = "poll"
 	}
 
 	return config{
 		Symbols:     symbols,
 		ChartSymbol: chartSymbol,
-		ChartLimit:  *chartLimitFlag,
-		Interval:    *intervalFlag,
-		Timeout:     *timeoutFlag,
-		TZ:          *tzFlag,
-		RESTBase:    strings.TrimRight(*restBaseFlag, "/"),
-		WSBase:      strings.TrimRight(*wsBaseFlag, "/"),
+		ChartLimit:  chartLimit,
+		Interval:    interval,
+		Timeout:     timeout,
+		TZ:          tz,
+		RESTBase:    restBase,
+		WSBase:      wsBase,
 		Mode:        mode,
-		Once:        *onceFlag,
-		NoColor:     *noColorFlag || os.Getenv("NO_COLOR") != "",
-		RetryDelay:  *retryDelayFlag,
+		Once:        raw.Once,
+		NoColor:     raw.NoColor || os.Getenv("NO_COLOR") != "",
+		RetryDelay:  retryDelay,
+		ConfigPath:  path,
+	}, nil
+}
+
+func resolveConfigPath() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
 	}
+
+	candidates := []string{
+		"./config.toml",
+		filepath.Join(homeDir, ".config", "binance-futures-ticker", "config.toml"),
+	}
+
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			abs, absErr := filepath.Abs(candidate)
+			if absErr == nil {
+				return abs, nil
+			}
+			return candidate, nil
+		}
+	}
+
+	return "", fmt.Errorf("config file not found; expected one of %s or %s", candidates[0], candidates[1])
 }
 
 func run(ctx context.Context, client *http.Client, cfg config, loc *time.Location, state *appState) error {

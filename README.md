@@ -1,6 +1,6 @@
 # Binance Futures Ticker
 
-一个 Go 命令行工具，用于查看币安 U 本位合约价格，支持轮询和 WebSocket 实时订阅两种模式，界面基于 `tview/tcell`。
+一个 Go 命令行工具，用于查看币安 U 本位合约价格，支持轮询和 WebSocket 实时订阅两种模式，界面基于 `tview/tcell`，配置通过 TOML 文件加载。
 
 ## 功能
 
@@ -13,6 +13,19 @@
 - 支持生成并实时刷新 1 小时 K 线图
 - 支持自定义时区，默认 `Asia/Shanghai`
 
+## 配置文件
+
+程序只读取配置文件，不再接受命令行参数。
+
+默认按以下顺序查找：
+
+1. `./config.toml`
+2. `~/.config/binance-futures-ticker/config.toml`
+
+如果没有配置文件，或者缺少任何必填字段，程序会直接报错退出。
+
+当前目录已经提供了一个可用的示例配置：[config.toml](/Users/acaibird/Developer/tmp/binance-futures-ticker/config.toml)。
+
 ## 运行
 
 ```bash
@@ -20,67 +33,29 @@ cd /Users/acaibird/Developer/tmp/binance-futures-ticker
 go run .
 ```
 
-默认行为：
-
-- 模式：`ws`
-- 合约：`ETHUSDT`
-- 轮询间隔：`3s`（仅 `poll` 模式使用）
-
-## 常用示例
-
-轮询模式，每秒刷新一次：
-
-```bash
-go run . -mode poll -symbols ETHUSDT,BTCUSDT,SOLUSDT -interval 1s
-```
-
-只请求一次后退出：
-
-```bash
-go run . -once
-```
-
-WebSocket 实时订阅：
-
-```bash
-go run . -mode ws -symbols ETHUSDT,BTCUSDT,SOLUSDT
-```
-
-指定图表 symbol，并显示最近 72 根 1 小时 K 线：
-
-```bash
-go run . -mode ws -symbols ETHUSDT,BTCUSDT,SOLUSDT -chart-symbol ETHUSDT -chart-limit 72
-```
-
 按 `q` 或 `Ctrl+C` 退出 TUI。
-
-关闭颜色输出：
-
-```bash
-go run . -mode ws -symbols ETHUSDT,BTCUSDT -no-color
-```
 
 编译后运行：
 
 ```bash
 go build -o ticker .
-./ticker -mode ws -symbols ETHUSDT,BTCUSDT
+./ticker
 ```
 
-## 参数
+## 配置字段
 
-- `-symbols`：逗号分隔的合约列表，默认 `ETHUSDT`
-- `-mode`：数据模式，`poll` 或 `ws`，默认 `ws`
-- `-interval`：轮询模式请求间隔，默认 `3s`
-- `-chart-symbol`：1 小时 K 线图使用的 symbol，默认取 `-symbols` 的第一个
-- `-chart-limit`：1 小时 K 线数量，默认 `48`
-- `-timeout`：HTTP 请求超时 / WebSocket 连接超时，默认 `8s`
-- `-retry-delay`：WebSocket 断线重连等待时间，默认 `2s`
-- `-tz`：终端输出时区，默认 `Asia/Shanghai`
-- `-base-url`：REST API 地址，默认 `https://fapi.binance.com`
-- `-ws-base-url`：WebSocket 地址，默认 `wss://fstream.binance.com`
-- `-once`：轮询模式下只请求一次然后退出
-- `-no-color`：禁用 TUI 颜色输出
+- `symbols`：合约列表，例如 `['ETHUSDT', 'BTCUSDT']`
+- `chart_symbol`：1 小时 K 线图使用的 symbol
+- `chart_limit`：1 小时 K 线数量
+- `interval`：轮询模式请求间隔，例如 `3s`
+- `timeout`：HTTP 请求超时 / WebSocket 连接超时，例如 `8s`
+- `retry_delay`：WebSocket 断线重连等待时间，例如 `2s`
+- `tz`：终端输出时区，例如 `Asia/Shanghai`
+- `rest_base`：REST API 地址
+- `ws_base`：WebSocket 地址
+- `mode`：`poll` 或 `ws`
+- `once`：是否只抓取一次快照并退出
+- `no_color`：是否禁用 TUI 颜色
 
 ## 界面说明
 
@@ -94,4 +69,21 @@ go build -o ticker .
 
 - 多合约轮询模式下，程序会并发请求每个 symbol，避免币安接口批量查询返回全市场数据的问题。
 - WebSocket 模式使用组合流订阅多个 `@ticker` 流，并带自动重连。
-- `-once` 会走非交互文本输出，便于脚本调用；其余模式使用 TUI。
+- `once = true` 会走非交互文本输出，便于脚本调用；其余模式使用 TUI。
+
+## 示例配置
+
+```toml
+symbols = ["ETHUSDT", "BTCUSDT", "SOLUSDT"]
+chart_symbol = "ETHUSDT"
+chart_limit = 48
+interval = "3s"
+timeout = "8s"
+tz = "Asia/Shanghai"
+rest_base = "https://fapi.binance.com"
+ws_base = "wss://fstream.binance.com"
+mode = "ws"
+once = false
+no_color = false
+retry_delay = "2s"
+```
