@@ -1,0 +1,6 @@
+binance-futures-ticker
+*.exe
+*.test
+*.out
+.DS_Store
+
