@@ -1,71 +1,72 @@
-# Binance Futures Ticker
+# BFT
 
-一个 Go 命令行工具，用于查看币安 U 本位合约价格和 1 小时 K 线图，界面基于 `tview/tcell`，配置通过 TOML 文件加载。
+[中文文档](./README.zh-CN.md)
 
-## 功能
+`bft` is a terminal-based Binance USD-M futures viewer written in Go. It focuses on realtime price monitoring and a live 1-hour candlestick chart, rendered with a `tview/tcell` TUI.
 
-- 支持多个合约同时显示
-- 支持 WebSocket 实时订阅，延迟更低
-- 基于 `tview/tcell` 的稳定 TUI 表格界面，不会一直滚屏
-- 价格上涨显示绿色，下跌显示红色，持平显示灰色
-- 显示当前时间、交易所时间、最近更新时间
-- 支持生成并实时刷新 1 小时 K 线图
-- 支持自定义时区，默认 `Asia/Shanghai`
+## Preview
 
-## 配置文件
+![BFT Screenshot](./assets/screenhot.png)
 
-程序只读取配置文件，不再接受命令行参数。
+![BFT Demo](./assets/example.gif)
 
-默认按以下顺序查找：
+## Features
+
+- Realtime USD-M futures quotes over Binance WebSocket streams
+- Live 1-hour candlestick chart with keyboard switching between configured symbols
+- Stable TUI built with `tview/tcell`
+- Green/red price movement highlighting
+- Help overlay with shortcut reference
+- TOML-based configuration only
+
+## Configuration
+
+The application reads config files only. It does not accept runtime CLI flags.
+
+It looks for config files in this order:
 
 1. `./config.toml`
 2. `~/.config/binance-futures-ticker/config.toml`
 
-如果没有配置文件，或者缺少任何必填字段，程序会直接报错退出。
+If no config file is found, or any required field is missing, the program exits with an error.
 
-当前目录已经提供了一个可用的示例配置：[config.toml](/Users/acaibird/Developer/tmp/binance-futures-ticker/config.toml)。
+An example config is included here: [config.example.toml](./config.example.toml)
 
-## 运行
+## Run
 
 ```bash
 cd /Users/acaibird/Developer/tmp/binance-futures-ticker
 go run .
 ```
 
-按 `q` 或 `Ctrl+C` 退出 TUI。
-
-编译后运行：
+Build the binary:
 
 ```bash
 go build -o bft .
 ./bft
 ```
 
-## 配置字段
+## Config Fields
 
-- `symbols`：合约列表，例如 `['ETHUSDT', 'BTCUSDT']`
-- `chart_symbol`：1 小时 K 线图使用的 symbol
-- `chart_limit`：1 小时 K 线数量
-- `timeout`：HTTP 请求超时 / WebSocket 连接超时，例如 `8s`
-- `retry_delay`：WebSocket 断线重连等待时间，例如 `2s`
-- `tz`：终端输出时区，例如 `Asia/Shanghai`
-- `rest_base`：REST API 地址
-- `ws_base`：WebSocket 地址
-- `no_color`：是否禁用 TUI 颜色
+- `symbols`: futures symbols to subscribe to, for example `['ETHUSDT', 'BTCUSDT']`
+- `chart_symbol`: symbol used by the 1-hour chart on startup
+- `chart_limit`: number of 1-hour candles to render
+- `timeout`: HTTP/WebSocket timeout, for example `8s`
+- `retry_delay`: reconnect delay after WebSocket disconnect, for example `2s`
+- `tz`: display timezone, for example `Asia/Shanghai`
+- `rest_base`: Binance REST API base URL
+- `ws_base`: Binance WebSocket base URL
+- `no_color`: disable TUI colors
 
-## 界面说明
+## Shortcuts
 
-- `PRICE`：当前价格
-- `DELTA`：相对上一次更新的变化值和变化百分比
-- `EXCHANGE_TIME`：交易所返回时间
-- `LOCAL_UPDATE`：本地收到更新的时间
-- 右侧 `1H Chart`：最近若干根 1 小时 K 线，先拉历史，再随 WebSocket 实时更新
+- `/` or `h`: open/close help
+- `Up`: previous chart symbol
+- `Down`: next chart symbol
+- `q`: quit
+- `Ctrl+C`: quit
 
-## 说明
-
-- WebSocket 模式使用组合流订阅多个 `@ticker` 流，并带自动重连。
-
-## 示例配置
+## Example Config
 
 ```toml
 symbols = ["ETHUSDT", "BTCUSDT", "SOLUSDT"]
