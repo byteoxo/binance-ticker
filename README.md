@@ -8,8 +8,6 @@
 
 <img src="./assets/screenhot.png" alt="BFT Screenshot" width="760">
 
-<img src="./assets/example.gif" alt="BFT Demo" width="760">
-
 ## Features
 
 - Realtime USD-M futures quotes over Binance WebSocket streams
