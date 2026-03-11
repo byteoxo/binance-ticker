@@ -168,6 +168,7 @@ type rowState struct {
 }
 
 type klineCandle struct {
+	Symbol     string
 	OpenTime   int64
 	CloseTime  int64
 	Open       string
@@ -193,15 +194,16 @@ type appState struct {
 }
 
 type uiModel struct {
-	app    *tview.Application
-	header *tview.TextView
-	status *tview.TextView
-	table  *tview.Table
-	chart  *tview.TextView
-	footer *tview.TextView
-	cfg    config
-	loc    *time.Location
-	state  *appState
+	app         *tview.Application
+	header      *tview.TextView
+	status      *tview.TextView
+	table       *tview.Table
+	chart       *tview.TextView
+	footer      *tview.TextView
+	cfg         config
+	loc         *time.Location
+	state       *appState
+	changeChart func(int)
 }
 
 func main() {
@@ -350,7 +352,40 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 		return nil
 	}
 
-	ui := newUI(cfg, loc, state)
+	var chartMu sync.RWMutex
+	chartSymbol := cfg.ChartSymbol
+	setChartSymbol := func(symbol string) {
+		chartMu.Lock()
+		chartSymbol = symbol
+		chartMu.Unlock()
+	}
+	getChartSymbol := func() string {
+		chartMu.RLock()
+		defer chartMu.RUnlock()
+		return chartSymbol
+	}
+
+	changeChart := func(offset int) {
+		current := getChartSymbol()
+		idx := indexOfSymbol(cfg.Symbols, current)
+		if idx < 0 {
+			idx = 0
+		}
+		next := cfg.Symbols[(idx+offset+len(cfg.Symbols))%len(cfg.Symbols)]
+		if next == current {
+			return
+		}
+
+		setChartSymbol(next)
+		state.setError(fmt.Sprintf("switching chart to %s...", next))
+		if err := loadChartHistoryForSymbol(ctx, client, cfg.RESTBase, next, cfg.ChartLimit, state); err != nil {
+			state.setError(fmt.Sprintf("chart switch failed: %v", err))
+			return
+		}
+		state.clearError()
+	}
+
+	ui := newUI(cfg, loc, state, changeChart)
 	errCh := make(chan error, 1)
 
 	go func() {
@@ -365,7 +400,7 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 		if cfg.Mode == "poll" {
 			err = runPollLoop(ctx, client, cfg, state, ui.requestDraw)
 		} else {
-			err = runWSLoop(ctx, cfg, state, ui.requestDraw)
+			err = runWSLoop(ctx, cfg, state, ui.requestDraw, getChartSymbol)
 		}
 		if err != nil {
 			select {
@@ -426,7 +461,7 @@ func runPollLoop(ctx context.Context, client *http.Client, cfg config, state *ap
 	}
 }
 
-func runWSLoop(ctx context.Context, cfg config, state *appState, notify func()) error {
+func runWSLoop(ctx context.Context, cfg config, state *appState, notify func(), getChartSymbol func() string) error {
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -435,7 +470,7 @@ func runWSLoop(ctx context.Context, cfg config, state *appState, notify func()) 
 		state.setError("connecting websocket...")
 		notify()
 
-		err := consumeWS(ctx, cfg, state, notify)
+		err := consumeWS(ctx, cfg, state, notify, getChartSymbol)
 		if err == nil || ctx.Err() != nil {
 			return nil
 		}
@@ -451,8 +486,8 @@ func runWSLoop(ctx context.Context, cfg config, state *appState, notify func()) 
 	}
 }
 
-func consumeWS(ctx context.Context, cfg config, state *appState, notify func()) error {
-	endpoint := buildWSURL(cfg.WSBase, cfg.Symbols, cfg.ChartSymbol)
+func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), getChartSymbol func() string) error {
+	endpoint := buildWSURL(cfg.WSBase, cfg.Symbols, getChartSymbol())
 	dialer := websocket.Dialer{HandshakeTimeout: cfg.Timeout}
 	conn, _, err := dialer.DialContext(ctx, endpoint, nil)
 	if err != nil {
@@ -497,7 +532,9 @@ func consumeWS(ctx context.Context, cfg config, state *appState, notify func()) 
 					readErrCh <- fmt.Errorf("decode websocket kline payload: %w", err)
 					return
 				}
-				state.applyChartCandle(candle, cfg.ChartLimit)
+				if candle.Symbol == getChartSymbol() {
+					state.applyChartCandle(candle, cfg.ChartLimit)
+				}
 				notify()
 			}
 		}
@@ -567,6 +604,7 @@ func parseWSKline(data []byte) (klineCandle, error) {
 	}
 
 	return newKlineCandle(
+		payload.Symbol,
 		int64(payload.Kline.StartTime),
 		int64(payload.Kline.CloseTime),
 		string(payload.Kline.Open),
@@ -578,11 +616,15 @@ func parseWSKline(data []byte) (klineCandle, error) {
 }
 
 func loadChartHistory(ctx context.Context, client *http.Client, cfg config, state *appState) error {
-	klines, err := fetchKlines(ctx, client, cfg.RESTBase, cfg.ChartSymbol, cfg.ChartLimit)
+	return loadChartHistoryForSymbol(ctx, client, cfg.RESTBase, cfg.ChartSymbol, cfg.ChartLimit, state)
+}
+
+func loadChartHistoryForSymbol(ctx context.Context, client *http.Client, baseURL, symbol string, limit int, state *appState) error {
+	klines, err := fetchKlines(ctx, client, baseURL, symbol, limit)
 	if err != nil {
 		return err
 	}
-	state.setChart(cfg.ChartSymbol, klines)
+	state.setChart(symbol, klines)
 	return nil
 }
 
@@ -614,7 +656,7 @@ func fetchKlines(ctx context.Context, client *http.Client, baseURL, symbol strin
 
 	klines := make([]klineCandle, 0, len(raw))
 	for _, item := range raw {
-		candle, err := parseRESTKline(item)
+		candle, err := parseRESTKline(symbol, item)
 		if err != nil {
 			return nil, err
 		}
@@ -639,7 +681,7 @@ func buildKlineURL(baseURL, symbol string, limit int) (string, error) {
 	return parsed.String(), nil
 }
 
-func parseRESTKline(item []interface{}) (klineCandle, error) {
+func parseRESTKline(symbol string, item []interface{}) (klineCandle, error) {
 	if len(item) < 7 {
 		return klineCandle{}, fmt.Errorf("invalid kline length: %d", len(item))
 	}
@@ -669,10 +711,10 @@ func parseRESTKline(item []interface{}) (klineCandle, error) {
 		return klineCandle{}, err
 	}
 
-	return newKlineCandle(openTime, closeTime, open, high, low, closePrice, true)
+	return newKlineCandle(symbol, openTime, closeTime, open, high, low, closePrice, true)
 }
 
-func newKlineCandle(openTime, closeTime int64, open, high, low, closePrice string, closed bool) (klineCandle, error) {
+func newKlineCandle(symbol string, openTime, closeTime int64, open, high, low, closePrice string, closed bool) (klineCandle, error) {
 	openValue, err := strconv.ParseFloat(open, 64)
 	if err != nil {
 		return klineCandle{}, err
@@ -691,6 +733,7 @@ func newKlineCandle(openTime, closeTime int64, open, high, low, closePrice strin
 	}
 
 	return klineCandle{
+		Symbol:     symbol,
 		OpenTime:   openTime,
 		CloseTime:  closeTime,
 		Open:       open,
@@ -935,7 +978,7 @@ func (s *appState) snapshot() ([]rowState, []klineCandle, string, string, time.T
 	return rows, chart, s.chartSymbol, s.lastError, s.startedAt, s.lastUpdate, s.mode
 }
 
-func newUI(cfg config, loc *time.Location, state *appState) *uiModel {
+func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int)) *uiModel {
 	app := tview.NewApplication()
 	app.SetRoot(tview.NewBox(), true)
 	tview.Styles.PrimitiveBackgroundColor = tcell.ColorDefault
@@ -968,13 +1011,23 @@ func newUI(cfg config, loc *time.Location, state *appState) *uiModel {
 	footer.SetBorder(true)
 	footer.SetText("q / Ctrl+C to quit")
 
-	ui := &uiModel{app: app, header: header, status: status, table: table, chart: chart, footer: footer, cfg: cfg, loc: loc, state: state}
+	ui := &uiModel{app: app, header: header, status: status, table: table, chart: chart, footer: footer, cfg: cfg, loc: loc, state: state, changeChart: changeChart}
 	ui.refresh()
 
 	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyCtrlC:
 			app.Stop()
+			return nil
+		case tcell.KeyUp:
+			if ui.changeChart != nil {
+				ui.changeChart(-1)
+			}
+			return nil
+		case tcell.KeyDown:
+			if ui.changeChart != nil {
+				ui.changeChart(1)
+			}
 			return nil
 		}
 		switch event.Rune() {
@@ -1303,4 +1356,13 @@ func normalizeSymbols(raw string) []string {
 		result = append(result, symbol)
 	}
 	return result
+}
+
+func indexOfSymbol(symbols []string, target string) int {
+	for i, symbol := range symbols {
+		if symbol == target {
+			return i
+		}
+	}
+	return -1
 }
