@@ -32,16 +32,24 @@
 
 仓库中提供了示例配置：[config.example.toml](./config.example.toml)
 
-## 运行
+## 安装
+
+### Homebrew（macOS / Linux）
 
 ```bash
-cd /Users/acaibird/Developer/tmp/binance-ticker
-go run .
+brew tap byteoxo/tap
+brew install binance-ticker
 ```
 
-编译为二进制：
+### 下载预编译二进制
+
+从 [Releases](https://github.com/byteoxo/binance-ticker/releases) 页面下载对应平台的压缩包。
+
+### 从源码编译
 
 ```bash
+git clone https://github.com/byteoxo/binance-ticker.git
+cd binance-ticker
 go build -o binance-ticker .
 ./binance-ticker
 ```
