@@ -45,7 +45,7 @@ const (
 	uiRefreshInterval         = time.Second
 	defaultChartLimit         = 48
 	defaultChartHeight        = 12
-	chartCandleWidth          = 3
+	chartCandleWidth          = 1
 	chartCandleGap            = 1
 	chartStride               = chartCandleWidth + chartCandleGap
 	bullColorTag              = "#00c853"
@@ -3002,9 +3002,48 @@ func buildChartText(candles []klineCandle, noColor bool) string {
 		span = 1
 	}
 
+	// Use 1x terminal-row resolution with │ for wicks and █ for body.
+	// Mixing half-block (▀▄) chars with box-drawing (│) always creates a
+	// half-row visual gap at boundaries, so we avoid them entirely.
+	// We use Ceil/Floor (instead of Round) for the wick endpoints so the
+	// wick range mathematically contains the body range, preventing gaps.
 	chartWidth := len(candles)*chartStride - chartCandleGap
+
+	scaleWickHigh := func(v float64) int {
+		// Ceil of normalized → smallest index (wick reaches as high as possible).
+		idx := defaultChartHeight - 1 - int(math.Ceil((v-low)/span*float64(defaultChartHeight-1)))
+		if idx < 0 {
+			return 0
+		}
+		if idx >= defaultChartHeight {
+			return defaultChartHeight - 1
+		}
+		return idx
+	}
+	scaleWickLow := func(v float64) int {
+		// Floor of normalized → largest index (wick reaches as low as possible).
+		idx := defaultChartHeight - 1 - int(math.Floor((v-low)/span*float64(defaultChartHeight-1)))
+		if idx < 0 {
+			return 0
+		}
+		if idx >= defaultChartHeight {
+			return defaultChartHeight - 1
+		}
+		return idx
+	}
+	scaleBody := func(v float64) int {
+		idx := defaultChartHeight - 1 - int(math.Round((v-low)/span*float64(defaultChartHeight-1)))
+		if idx < 0 {
+			return 0
+		}
+		if idx >= defaultChartHeight {
+			return defaultChartHeight - 1
+		}
+		return idx
+	}
+
 	rows := make([][]string, defaultChartHeight)
-	for y := 0; y < defaultChartHeight; y++ {
+	for y := range rows {
 		rows[y] = make([]string, chartWidth)
 		for x := range rows[y] {
 			rows[y][x] = " "
@@ -3012,12 +3051,12 @@ func buildChartText(candles []klineCandle, noColor bool) string {
 	}
 
 	for i, candle := range candles {
-		baseX := i * chartStride
-		wickX := baseX + chartCandleWidth/2
-		highY := scaleValue(candle.HighValue, low, span)
-		lowY := scaleValue(candle.LowValue, low, span)
-		openY := scaleValue(candle.OpenValue, low, span)
-		closeY := scaleValue(candle.CloseValue, low, span)
+		wickX := i * chartStride
+
+		highY := scaleWickHigh(candle.HighValue)
+		lowY := scaleWickLow(candle.LowValue)
+		openY := scaleBody(candle.OpenValue)
+		closeY := scaleBody(candle.CloseValue)
 
 		color := bullColorTag
 		if candle.CloseValue < candle.OpenValue {
@@ -3029,18 +3068,14 @@ func buildChartText(candles []klineCandle, noColor bool) string {
 		upper := minInt(openY, closeY)
 		lower := maxInt(openY, closeY)
 
+		// Wick: │ spans full terminal-row height, so it connects flush to █
+		// above and below with no gap.
 		for y := highY; y <= lowY; y++ {
-			rows[y][wickX] = uiGlyph("┃", noColor, color)
+			rows[y][wickX] = uiGlyph("│", noColor, color)
 		}
+		// Body: █ overwrites wick in the open→close range.
 		for y := upper; y <= lower; y++ {
-			for dx := 0; dx < chartCandleWidth; dx++ {
-				rows[y][baseX+dx] = uiGlyph("█", noColor, color)
-			}
-		}
-		if upper == lower {
-			for dx := 0; dx < chartCandleWidth; dx++ {
-				rows[upper][baseX+dx] = uiGlyph("▀", noColor, color)
-			}
+			rows[y][wickX] = uiGlyph("█", noColor, color)
 		}
 	}
 
