@@ -3061,8 +3061,6 @@ func buildChartText(candles []klineCandle, noColor bool) string {
 		color := bullColorTag
 		if candle.CloseValue < candle.OpenValue {
 			color = bearColorTag
-		} else if candle.CloseValue == candle.OpenValue {
-			color = neutralColorTag
 		}
 
 		upper := minInt(openY, closeY)
