@@ -29,13 +29,20 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Collect commits since last tag
         id: commits
         run: |
-          # Find the previous tag; fall back to the first commit if this is the first release
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null \
             || git rev-list --max-parents=0 HEAD)
-          echo "prev_tag=$PREV_TAG" >> $GITHUB_OUTPUT
 
           git log "${PREV_TAG}..HEAD" \
             --pretty=format:"- %s (%h)" \
@@ -46,14 +53,13 @@ jobs:
           cat "$RUNNER_TEMP/commits.txt"
 
       - name: Generate release notes via OpenRouter
-        id: notes
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ inputs.tag || github.ref_name }}"
           COMMITS="$(cat "$RUNNER_TEMP/commits.txt")"
 
-          # Build request JSON safely with jq
           PAYLOAD=$(jq -n \
             --arg tag "$TAG" \
             --arg commits "$COMMITS" \
@@ -85,19 +91,14 @@ jobs:
           NOTES=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
 
           if [ -z "$NOTES" ]; then
-            echo "⚠️  OpenRouter call failed or returned empty — falling back to raw commits"
+            echo "⚠️  OpenRouter call failed — falling back to raw commits"
             NOTES="$(cat "$RUNNER_TEMP/commits.txt")"
           fi
 
           echo "=== Release notes ==="
           echo "$NOTES"
-          echo "$NOTES" > "$RUNNER_TEMP/release_notes.md"
 
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          distribution: goreleaser
-          version: latest
-          args: release --clean --release-notes ${{ runner.temp }}/release_notes.md
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Update the release body via gh CLI (works regardless of file paths)
+          gh release edit "$TAG" \
+            --repo "${{ github.repository }}" \
+            --notes "$NOTES"
