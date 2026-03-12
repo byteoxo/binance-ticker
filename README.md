@@ -2,7 +2,7 @@
 
 [中文文档](./README.zh-CN.md)
 
-`bft` is a terminal-based Binance USD-M futures viewer written in Go. It focuses on realtime price monitoring and a live 1-hour candlestick chart, rendered with a `tview/tcell` TUI.
+`bft` is a terminal-based Binance market viewer written in Go. It focuses on realtime futures and spot monitoring with live 1-hour candlestick charts, rendered with a `tview/tcell` TUI.
 
 ## Preview
 
@@ -10,8 +10,8 @@
 
 ## Features
 
-- Realtime USD-M futures quotes over Binance WebSocket streams
-- Live 1-hour candlestick chart with keyboard switching between configured symbols
+- Realtime Binance USD-M futures and spot quotes over WebSocket streams
+- Live 1-hour candlestick charts for both futures and spot, with keyboard symbol switching
 - Stable TUI built with `tview/tcell`
 - Green/red price movement highlighting
 - Help overlay with shortcut reference
@@ -24,7 +24,7 @@ The application reads config files only. It does not accept runtime CLI flags.
 It looks for config files in this order:
 
 1. `./config.toml`
-2. `~/.config/binance-futures-ticker/config.toml`
+2. `~/.config/binance-ticker/config.toml`
 
 If no config file is found, or any required field is missing, the program exits with an error.
 
@@ -33,7 +33,7 @@ An example config is included here: [config.example.toml](./config.example.toml)
 ## Run
 
 ```bash
-cd /Users/acaibird/Developer/tmp/binance-futures-ticker
+cd /Users/acaibird/Developer/tmp/binance-ticker
 go run .
 ```
 
@@ -47,8 +47,10 @@ go build -o bft .
 ## Config Fields
 
 - `symbols`: futures symbols to subscribe to, for example `['ETHUSDT', 'BTCUSDT']`
-- `chart_symbol`: symbol used by the 1-hour chart on startup
+- `spot_symbols`: configured spot assets, for example `['ZKC', 'BARD']`
+- `chart_symbol`: startup futures chart symbol
 - `chart_limit`: number of 1-hour candles to render
+- `default_panel`: `futures` or `spot`
 - `timeout`: HTTP/WebSocket timeout, for example `8s`
 - `retry_delay`: reconnect delay after WebSocket disconnect, for example `2s`
 - `tz`: display timezone, for example `Asia/Shanghai`
@@ -59,8 +61,8 @@ go build -o bft .
 ## Shortcuts
 
 - `/` or `h`: open/close help
-- `Up`: previous chart symbol
-- `Down`: next chart symbol
+- `Up` / `Left`: previous chart symbol
+- `Down` / `Right`: next chart symbol
 - `q`: quit
 - `Ctrl+C`: quit
 

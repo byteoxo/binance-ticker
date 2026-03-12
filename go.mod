@@ -1,4 +1,4 @@
-module binance-futures-ticker
+module binance-ticker
 
 go 1.26.1
 
