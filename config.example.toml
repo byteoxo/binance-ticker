@@ -7,3 +7,6 @@ rest_base = "https://fapi.binance.com"
 ws_base = "wss://fstream.binance.com"
 no_color = false
 retry_delay = "2s"
+account_refresh = "5s"
+api_key = ""
+api_secret = ""
