@@ -493,7 +493,7 @@ func resolveConfigPath() (string, error) {
 
 	candidates := []string{
 		"./config.toml",
-		filepath.Join(homeDir, ".config", "binance-futures-ticker", "config.toml"),
+		filepath.Join(homeDir, ".config", "binance-ticker", "config.toml"),
 	}
 
 	for _, candidate := range candidates {
