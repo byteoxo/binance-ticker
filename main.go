@@ -30,13 +30,14 @@ import (
 )
 
 const (
-	defaultWSBaseURL      = "wss://fstream.binance.com"
-	defaultRESTBaseURL    = "https://fapi.binance.com"
-	klinePath             = "/fapi/v1/klines"
-	positionRiskPath      = "/fapi/v3/positionRisk"
-	defaultTimeout        = 8 * time.Second
-	defaultAccountRefresh = 5 * time.Second
-	uiRefreshInterval     = time.Second
+	defaultWSBaseURL           = "wss://fstream.binance.com"
+	defaultRESTBaseURL         = "https://fapi.binance.com"
+	klinePath                  = "/fapi/v1/klines"
+	positionRiskPath           = "/fapi/v3/positionRisk"
+	listenKeyPath              = "/fapi/v1/listenKey"
+	defaultTimeout             = 8 * time.Second
+	userDataKeepaliveInterval  = 50 * time.Minute
+	uiRefreshInterval          = time.Second
 	defaultChartLimit     = 48
 	defaultChartHeight    = 12
 	chartCandleWidth      = 3
@@ -48,34 +49,32 @@ const (
 )
 
 type config struct {
-	Symbols        []string
-	ChartSymbol    string
-	ChartLimit     int
-	Timeout        time.Duration
-	TZ             string
-	RESTBase       string
-	WSBase         string
-	NoColor        bool
-	RetryDelay     time.Duration
-	AccountRefresh time.Duration
-	APIKey         string
-	APISecret      string
-	ConfigPath     string
+	Symbols     []string
+	ChartSymbol string
+	ChartLimit  int
+	Timeout     time.Duration
+	TZ          string
+	RESTBase    string
+	WSBase      string
+	NoColor     bool
+	RetryDelay  time.Duration
+	APIKey      string
+	APISecret   string
+	ConfigPath  string
 }
 
 type rawConfig struct {
-	Symbols        []string `toml:"symbols"`
-	ChartSymbol    string   `toml:"chart_symbol"`
-	ChartLimit     int      `toml:"chart_limit"`
-	Timeout        string   `toml:"timeout"`
-	TZ             string   `toml:"tz"`
-	RESTBase       string   `toml:"rest_base"`
-	WSBase         string   `toml:"ws_base"`
-	NoColor        bool     `toml:"no_color"`
-	RetryDelay     string   `toml:"retry_delay"`
-	AccountRefresh string   `toml:"account_refresh"`
-	APIKey         string   `toml:"api_key"`
-	APISecret      string   `toml:"api_secret"`
+	Symbols     []string `toml:"symbols"`
+	ChartSymbol string   `toml:"chart_symbol"`
+	ChartLimit  int      `toml:"chart_limit"`
+	Timeout     string   `toml:"timeout"`
+	TZ          string   `toml:"tz"`
+	RESTBase    string   `toml:"rest_base"`
+	WSBase      string   `toml:"ws_base"`
+	NoColor     bool     `toml:"no_color"`
+	RetryDelay  string   `toml:"retry_delay"`
+	APIKey      string   `toml:"api_key"`
+	APISecret   string   `toml:"api_secret"`
 }
 
 func (cfg config) hasAccountAuth() bool {
@@ -100,6 +99,35 @@ type wsKlinePayload struct {
 	Low       jsonFlexibleString `json:"l"`
 	Close     jsonFlexibleString `json:"c"`
 	IsClosed  bool               `json:"x"`
+}
+
+type userDataListenKeyResponse struct {
+	ListenKey string `json:"listenKey"`
+}
+
+type userDataEvent struct {
+	EventType string `json:"e"`
+	ListenKey string `json:"listenKey"`
+}
+
+type userDataAccountUpdateEvent struct {
+	EventType string                `json:"e"`
+	EventTime jsonFlexibleInt64     `json:"E"`
+	Data      userDataAccountUpdate `json:"a"`
+}
+
+type userDataAccountUpdate struct {
+	Reason    string                    `json:"m"`
+	Positions []userDataPositionPayload `json:"P"`
+}
+
+type userDataPositionPayload struct {
+	Symbol           string             `json:"s"`
+	PositionAmt      jsonFlexibleString `json:"pa"`
+	EntryPrice       jsonFlexibleString `json:"ep"`
+	UnrealizedProfit jsonFlexibleString `json:"up"`
+	MarginType       string             `json:"mt"`
+	PositionSide     string             `json:"ps"`
 }
 
 type jsonFlexibleInt64 int64
@@ -217,6 +245,17 @@ type positionState struct {
 	UpdateTime       int64
 }
 
+type positionUpdate struct {
+	Symbol        string
+	Side          string
+	Size          float64
+	EntryPrice    float64
+	UnrealizedPnL float64
+	MarginType    string
+	UpdateTime    int64
+	Remove        bool
+}
+
 type appState struct {
 	mu                sync.RWMutex
 	rows              map[string]rowState
@@ -315,14 +354,6 @@ func loadConfig() (config, error) {
 		return config{}, fmt.Errorf("config %s field %q must be a valid positive duration", path, "retry_delay")
 	}
 
-	accountRefresh := defaultAccountRefresh
-	if value := strings.TrimSpace(raw.AccountRefresh); value != "" {
-		accountRefresh, err = time.ParseDuration(value)
-		if err != nil || accountRefresh <= 0 {
-			return config{}, fmt.Errorf("config %s field %q must be a valid positive duration", path, "account_refresh")
-		}
-	}
-
 	apiKey := strings.TrimSpace(raw.APIKey)
 	apiSecret := strings.TrimSpace(raw.APISecret)
 	if (apiKey == "") != (apiSecret == "") {
@@ -350,12 +381,11 @@ func loadConfig() (config, error) {
 		TZ:             tz,
 		RESTBase:       restBase,
 		WSBase:         wsBase,
-		NoColor:        raw.NoColor || os.Getenv("NO_COLOR") != "",
-		RetryDelay:     retryDelay,
-		AccountRefresh: accountRefresh,
-		APIKey:         apiKey,
-		APISecret:      apiSecret,
-		ConfigPath:     path,
+		NoColor:    raw.NoColor || os.Getenv("NO_COLOR") != "",
+		RetryDelay: retryDelay,
+		APIKey:      apiKey,
+		APISecret:   apiSecret,
+		ConfigPath:  path,
 	}, nil
 }
 
@@ -388,7 +418,7 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 		state.setError(fmt.Sprintf("chart init failed: %v", err))
 	}
 	if cfg.hasAccountAuth() {
-		if err := syncPositions(ctx, client, cfg, state); err != nil {
+		if err := loadInitialPositions(ctx, client, cfg, state); err != nil {
 			state.setAccountError(fmt.Sprintf("positions init failed: %v", err))
 		}
 	}
@@ -404,6 +434,15 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 		chartMu.RLock()
 		defer chartMu.RUnlock()
 		return chartSymbol
+	}
+	getTickerSymbols := func() []string {
+		_, _, positions, _, _, _, _, _, _, _ := state.snapshot()
+		combined := make([]string, 0, len(cfg.Symbols)+len(positions))
+		combined = append(combined, cfg.Symbols...)
+		for _, position := range positions {
+			combined = append(combined, position.Symbol)
+		}
+		return normalizeSymbolList(combined)
 	}
 
 	changeChart := func(offset int) {
@@ -437,7 +476,7 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 	}()
 
 	go func() {
-		err := runWSLoop(ctx, cfg, state, ui.requestDraw, getChartSymbol)
+		err := runWSLoop(ctx, cfg, state, ui.requestDraw, getChartSymbol, getTickerSymbols)
 		if err != nil {
 			select {
 			case errCh <- err:
@@ -447,7 +486,7 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 	}()
 
 	if cfg.hasAccountAuth() {
-		go runAccountLoop(ctx, client, cfg, state, ui.requestDraw)
+		go runUserDataLoop(ctx, client, cfg, state, ui.requestDraw)
 	}
 
 	go ui.runClock(ctx)
@@ -464,7 +503,7 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 	}
 }
 
-func runWSLoop(ctx context.Context, cfg config, state *appState, notify func(), getChartSymbol func() string) error {
+func runWSLoop(ctx context.Context, cfg config, state *appState, notify func(), getChartSymbol func() string, getTickerSymbols func() []string) error {
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -473,9 +512,12 @@ func runWSLoop(ctx context.Context, cfg config, state *appState, notify func(), 
 		state.setError("connecting websocket...")
 		notify()
 
-		err := consumeWS(ctx, cfg, state, notify, getChartSymbol)
+		err := consumeWS(ctx, cfg, state, notify, getChartSymbol, getTickerSymbols)
 		if err == nil || ctx.Err() != nil {
 			return nil
+		}
+		if errors.Is(err, errResubscribe) {
+			continue
 		}
 
 		state.setError(fmt.Sprintf("websocket disconnected: %v | retry in %s", err, cfg.RetryDelay))
@@ -489,8 +531,8 @@ func runWSLoop(ctx context.Context, cfg config, state *appState, notify func(), 
 	}
 }
 
-func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), getChartSymbol func() string) error {
-	endpoint := buildWSURL(cfg.WSBase, cfg.Symbols, getChartSymbol())
+func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), getChartSymbol func() string, getTickerSymbols func() []string) error {
+	endpoint := buildWSURL(cfg.WSBase, getTickerSymbols(), getChartSymbol())
 	dialer := websocket.Dialer{HandshakeTimeout: cfg.Timeout}
 	conn, _, err := dialer.DialContext(ctx, endpoint, nil)
 	if err != nil {
@@ -509,6 +551,9 @@ func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), 
 
 	pingTicker := time.NewTicker(cfg.Timeout)
 	defer pingTicker.Stop()
+	resubscribeTicker := time.NewTicker(time.Second)
+	defer resubscribeTicker.Stop()
+	baselineSymbols := strings.Join(getTickerSymbols(), ",")
 
 	readErrCh := make(chan error, 1)
 	go func() {
@@ -560,11 +605,21 @@ func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), 
 			if err := conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(time.Second)); err != nil {
 				return fmt.Errorf("ping websocket: %w", err)
 			}
+		case <-resubscribeTicker.C:
+			currentSymbols := strings.Join(getTickerSymbols(), ",")
+			if currentSymbols != baselineSymbols {
+				state.setError("updating market subscriptions...")
+				notify()
+				return errResubscribe
+			}
 		}
 	}
 }
 
-var netErrClosed = errors.New("use of closed network connection")
+var (
+	netErrClosed   = errors.New("use of closed network connection")
+	errResubscribe = errors.New("market stream resubscribe requested")
+)
 
 func parseWSTicker(data []byte) (priceTicker, error) {
 	var payload map[string]json.RawMessage
@@ -622,26 +677,7 @@ func loadChartHistory(ctx context.Context, client *http.Client, cfg config, stat
 	return loadChartHistoryForSymbol(ctx, client, cfg.RESTBase, cfg.ChartSymbol, cfg.ChartLimit, state)
 }
 
-func runAccountLoop(ctx context.Context, client *http.Client, cfg config, state *appState, notify func()) {
-	ticker := time.NewTicker(cfg.AccountRefresh)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := syncPositions(ctx, client, cfg, state); err != nil {
-				state.setAccountError(fmt.Sprintf("positions sync failed: %v", err))
-			} else {
-				state.clearAccountError()
-			}
-			notify()
-		}
-	}
-}
-
-func syncPositions(ctx context.Context, client *http.Client, cfg config, state *appState) error {
+func loadInitialPositions(ctx context.Context, client *http.Client, cfg config, state *appState) error {
 	positions, err := fetchPositions(ctx, client, cfg)
 	if err != nil {
 		return err
@@ -763,14 +799,249 @@ func buildSignedURL(baseURL, path string, query url.Values, secret string) (stri
 	}
 	parsed.Path = path
 	encoded := query.Encode()
-	parsed.RawQuery = encoded + "&signature=" + signQuery(encoded, secret)
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(encoded))
+	parsed.RawQuery = encoded + "&signature=" + hex.EncodeToString(mac.Sum(nil))
 	return parsed.String(), nil
 }
 
-func signQuery(payload, secret string) string {
-	mac := hmac.New(sha256.New, []byte(secret))
-	_, _ = mac.Write([]byte(payload))
-	return hex.EncodeToString(mac.Sum(nil))
+func runUserDataLoop(ctx context.Context, client *http.Client, cfg config, state *appState, notify func()) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		state.setAccountError("connecting user data stream...")
+		notify()
+
+		listenKey, err := createListenKey(ctx, client, cfg)
+		if err != nil {
+			state.setAccountError(fmt.Sprintf("user data stream start failed: %v", err))
+			notify()
+		} else {
+			state.setAccountError("")
+			notify()
+			err = consumeUserDataStream(ctx, client, cfg, state, notify, listenKey)
+			if err == nil || ctx.Err() != nil {
+				return
+			}
+			state.setAccountError(fmt.Sprintf("user data stream disconnected: %v | retry in %s", err, cfg.RetryDelay))
+			notify()
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(cfg.RetryDelay):
+		}
+	}
+}
+
+func consumeUserDataStream(ctx context.Context, client *http.Client, cfg config, state *appState, notify func(), listenKey string) error {
+	endpoint := strings.TrimRight(cfg.WSBase, "/") + "/ws/" + listenKey
+	dialer := websocket.Dialer{HandshakeTimeout: cfg.Timeout}
+	conn, _, err := dialer.DialContext(ctx, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("dial user data websocket: %w", err)
+	}
+	defer conn.Close()
+	defer closeListenKey(context.Background(), client, cfg, listenKey)
+
+	keepaliveTicker := time.NewTicker(userDataKeepaliveInterval)
+	defer keepaliveTicker.Stop()
+	pingTicker := time.NewTicker(cfg.Timeout)
+	defer pingTicker.Stop()
+
+	conn.SetReadLimit(1 << 20)
+	_ = conn.SetReadDeadline(time.Now().Add(2 * cfg.Timeout))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(2 * cfg.Timeout))
+	})
+
+	readErrCh := make(chan error, 1)
+	go func() {
+		defer close(readErrCh)
+		for {
+			var payload userDataEvent
+			if err := conn.ReadJSON(&payload); err != nil {
+				readErrCh <- err
+				return
+			}
+
+			switch payload.EventType {
+			case "ACCOUNT_UPDATE":
+				updates, err := parseAccountUpdateEvent(payload)
+				if err != nil {
+					readErrCh <- fmt.Errorf("decode account update payload: %w", err)
+					return
+				}
+				state.applyPositionUpdates(updates)
+				state.clearAccountError()
+				notify()
+			case "listenKeyExpired":
+				readErrCh <- errors.New("listen key expired")
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutdown"), time.Now().Add(time.Second))
+			return nil
+		case err := <-readErrCh:
+			if err == nil {
+				return nil
+			}
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) || errors.Is(err, netErrClosed) {
+				return err
+			}
+			return err
+		case <-keepaliveTicker.C:
+			if err := keepaliveListenKey(ctx, client, cfg, listenKey); err != nil {
+				return fmt.Errorf("keepalive listen key: %w", err)
+			}
+		case <-pingTicker.C:
+			if err := conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(time.Second)); err != nil {
+				return fmt.Errorf("ping user data websocket: %w", err)
+			}
+		}
+	}
+}
+
+func createListenKey(ctx context.Context, client *http.Client, cfg config) (string, error) {
+	resp, err := doListenKeyRequest(ctx, client, cfg, http.MethodPost, "")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read listen key response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("listen key status %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var payload userDataListenKeyResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", fmt.Errorf("decode listen key response: %w", err)
+	}
+	if strings.TrimSpace(payload.ListenKey) == "" {
+		return "", errors.New("missing listen key in response")
+	}
+	return payload.ListenKey, nil
+}
+
+func keepaliveListenKey(ctx context.Context, client *http.Client, cfg config, listenKey string) error {
+	resp, err := doListenKeyRequest(ctx, client, cfg, http.MethodPut, listenKey)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read keepalive response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("keepalive status %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
+func closeListenKey(ctx context.Context, client *http.Client, cfg config, listenKey string) {
+	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
+	resp, err := doListenKeyRequest(ctx, client, cfg, http.MethodDelete, listenKey)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+}
+
+func doListenKeyRequest(ctx context.Context, client *http.Client, cfg config, method, listenKey string) (*http.Response, error) {
+	parsed, err := url.Parse(cfg.RESTBase)
+	if err != nil {
+		return nil, fmt.Errorf("parse base url: %w", err)
+	}
+	parsed.Path = listenKeyPath
+	if listenKey != "" {
+		query := url.Values{}
+		query.Set("listenKey", listenKey)
+		parsed.RawQuery = query.Encode()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, parsed.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build listen key request: %w", err)
+	}
+	req.Header.Set("X-MBX-APIKEY", cfg.APIKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send listen key request: %w", err)
+	}
+	return resp, nil
+}
+
+func parseAccountUpdateEvent(event userDataEvent) ([]positionUpdate, error) {
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return nil, err
+	}
+
+	var payload userDataAccountUpdateEvent
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		return nil, err
+	}
+
+	updates := make([]positionUpdate, 0, len(payload.Data.Positions))
+	for _, item := range payload.Data.Positions {
+		update, err := parsePositionUpdatePayload(item, int64(payload.EventTime))
+		if err != nil {
+			return nil, err
+		}
+		updates = append(updates, update)
+	}
+	return updates, nil
+}
+
+func parsePositionUpdatePayload(item userDataPositionPayload, updateTime int64) (positionUpdate, error) {
+	size, err := strconv.ParseFloat(string(item.PositionAmt), 64)
+	if err != nil {
+		return positionUpdate{}, fmt.Errorf("parse position update size for %s: %w", item.Symbol, err)
+	}
+	entryPrice, err := strconv.ParseFloat(string(item.EntryPrice), 64)
+	if err != nil {
+		return positionUpdate{}, fmt.Errorf("parse position update entry for %s: %w", item.Symbol, err)
+	}
+	unrealizedPnL, err := strconv.ParseFloat(string(item.UnrealizedProfit), 64)
+	if err != nil {
+		return positionUpdate{}, fmt.Errorf("parse position update pnl for %s: %w", item.Symbol, err)
+	}
+
+	side := strings.ToUpper(strings.TrimSpace(item.PositionSide))
+	if side == "" || side == "BOTH" {
+		if size > 0 {
+			side = "LONG"
+		} else if size < 0 {
+			side = "SHORT"
+		}
+	}
+
+	return positionUpdate{
+		Symbol:        strings.ToUpper(strings.TrimSpace(item.Symbol)),
+		Side:          side,
+		Size:          math.Abs(size),
+		EntryPrice:    entryPrice,
+		UnrealizedPnL: unrealizedPnL,
+		MarginType:    strings.ToUpper(strings.TrimSpace(item.MarginType)),
+		UpdateTime:    updateTime,
+		Remove:        math.Abs(size) < 1e-12,
+	}, nil
 }
 
 func loadChartHistoryForSymbol(ctx context.Context, client *http.Client, baseURL, symbol string, limit int, state *appState) error {
@@ -925,14 +1196,31 @@ func interfaceToString(value interface{}) (string, error) {
 }
 
 func buildWSURL(baseURL string, symbols []string, chartSymbol string) string {
-	streams := make([]string, 0, len(symbols))
-	for _, symbol := range symbols {
+	streams := make([]string, 0, len(symbols)+1)
+	for _, symbol := range normalizeSymbolList(symbols) {
 		streams = append(streams, strings.ToLower(symbol)+"@ticker")
 	}
 	if chartSymbol != "" {
 		streams = append(streams, strings.ToLower(chartSymbol)+"@kline_1h")
 	}
 	return baseURL + "/stream?streams=" + strings.Join(streams, "/")
+}
+
+func normalizeSymbolList(symbols []string) []string {
+	seen := make(map[string]struct{}, len(symbols))
+	result := make([]string, 0, len(symbols))
+	for _, raw := range symbols {
+		symbol := strings.ToUpper(strings.TrimSpace(raw))
+		if symbol == "" {
+			continue
+		}
+		if _, ok := seen[symbol]; ok {
+			continue
+		}
+		seen[symbol] = struct{}{}
+		result = append(result, symbol)
+	}
+	return result
 }
 
 func newAppState(symbols []string, accountEnabled bool) *appState {
@@ -1014,6 +1302,7 @@ func (s *appState) applyTickerLocked(ticker priceTicker) {
 			current.Delta = 0
 			current.DeltaPct = 0
 		}
+		s.refreshPositionMarketValueLocked(ticker.Symbol, value)
 	}
 
 	s.rows[ticker.Symbol] = current
@@ -1027,6 +1316,21 @@ func compareFloat(a, b float64) int {
 		return 1
 	}
 	return -1
+}
+
+func calculatePositionPnL(position positionState) float64 {
+	if position.MarkPrice == 0 || position.EntryPrice == 0 || position.Size == 0 {
+		return position.UnrealizedPnL
+	}
+
+	switch strings.ToUpper(strings.TrimSpace(position.Side)) {
+	case "LONG":
+		return (position.MarkPrice - position.EntryPrice) * position.Size
+	case "SHORT":
+		return (position.EntryPrice - position.MarkPrice) * position.Size
+	default:
+		return position.UnrealizedPnL
+	}
 }
 
 func (s *appState) setError(message string) {
@@ -1045,6 +1349,106 @@ func (s *appState) setPositions(positions []positionState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.positions = append([]positionState(nil), positions...)
+	for i := range s.positions {
+		if ticker, ok := s.rows[s.positions[i].Symbol]; ok && ticker.PriceValue > 0 {
+			s.positions[i].MarkPrice = ticker.PriceValue
+			s.positions[i].UnrealizedPnL = calculatePositionPnL(s.positions[i])
+		}
+	}
+	s.accountLastUpdate = time.Now()
+}
+
+func (s *appState) refreshPositionMarketValueLocked(symbol string, markPrice float64) {
+	for i := range s.positions {
+		if s.positions[i].Symbol != symbol {
+			continue
+		}
+		s.positions[i].MarkPrice = markPrice
+		s.positions[i].UnrealizedPnL = calculatePositionPnL(s.positions[i])
+	}
+}
+
+func (s *appState) applyPositionUpdates(updates []positionUpdate) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(updates) == 0 {
+		s.accountLastUpdate = time.Now()
+		return
+	}
+
+	indexByKey := make(map[string]int, len(s.positions))
+	for i, position := range s.positions {
+		indexByKey[position.Symbol+"|"+position.Side] = i
+	}
+
+	for _, update := range updates {
+		if update.Symbol == "" {
+			continue
+		}
+		key := update.Symbol + "|" + update.Side
+		idx, exists := indexByKey[key]
+		if update.Remove {
+			if exists {
+				s.positions = append(s.positions[:idx], s.positions[idx+1:]...)
+				indexByKey = make(map[string]int, len(s.positions))
+				for i, position := range s.positions {
+					indexByKey[position.Symbol+"|"+position.Side] = i
+				}
+			}
+			continue
+		}
+
+		position := positionState{
+			Symbol:        update.Symbol,
+			Side:          update.Side,
+			Size:          update.Size,
+			EntryPrice:    update.EntryPrice,
+			UnrealizedPnL: update.UnrealizedPnL,
+			MarginType:    update.MarginType,
+			UpdateTime:    update.UpdateTime,
+		}
+
+		if exists {
+			current := s.positions[idx]
+			position.MarkPrice = current.MarkPrice
+			position.LiquidationPrice = current.LiquidationPrice
+			position.Leverage = current.Leverage
+			if position.MarginType == "" {
+				position.MarginType = current.MarginType
+			}
+			if position.MarkPrice > 0 {
+				position.UnrealizedPnL = calculatePositionPnL(position)
+			}
+			s.positions[idx] = position
+		} else {
+			s.positions = append(s.positions, position)
+			indexByKey[key] = len(s.positions) - 1
+		}
+	}
+
+	sort.Slice(s.positions, func(i, j int) bool {
+		if s.positions[i].Symbol == s.positions[j].Symbol {
+			return s.positions[i].Side < s.positions[j].Side
+		}
+		return s.positions[i].Symbol < s.positions[j].Symbol
+	})
+	for _, row := range s.positions {
+		if ticker, ok := s.rows[row.Symbol]; ok {
+			positionMark := row.MarkPrice
+			if positionMark == 0 {
+				positionMark = ticker.PriceValue
+			}
+			if positionMark > 0 {
+				for i := range s.positions {
+					if s.positions[i].Symbol == row.Symbol && s.positions[i].Side == row.Side {
+						s.positions[i].MarkPrice = positionMark
+					}
+				}
+			}
+		}
+	}
+
 	s.accountLastUpdate = time.Now()
 }
 
@@ -1270,7 +1674,7 @@ func (ui *uiModel) refresh() {
 
 	accountMode := "disabled"
 	if accountEnabled {
-		accountMode = fmt.Sprintf("enabled | refresh %s", ui.cfg.AccountRefresh)
+		accountMode = "enabled | stream"
 	}
 
 	ui.header.SetText(fmt.Sprintf(
