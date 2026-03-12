@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
@@ -26,44 +30,56 @@ import (
 )
 
 const (
-	defaultWSBaseURL   = "wss://fstream.binance.com"
-	defaultRESTBaseURL = "https://fapi.binance.com"
-	klinePath          = "/fapi/v1/klines"
-	defaultTimeout     = 8 * time.Second
-	uiRefreshInterval  = time.Second
-	defaultChartLimit  = 48
-	defaultChartHeight = 12
-	chartCandleWidth   = 3
-	chartCandleGap     = 1
-	chartStride        = chartCandleWidth + chartCandleGap
-	bullColorTag       = "#00c853"
-	bearColorTag       = "#e53935"
-	neutralColorTag    = "#9aa0a6"
+	defaultWSBaseURL      = "wss://fstream.binance.com"
+	defaultRESTBaseURL    = "https://fapi.binance.com"
+	klinePath             = "/fapi/v1/klines"
+	positionRiskPath      = "/fapi/v3/positionRisk"
+	defaultTimeout        = 8 * time.Second
+	defaultAccountRefresh = 5 * time.Second
+	uiRefreshInterval     = time.Second
+	defaultChartLimit     = 48
+	defaultChartHeight    = 12
+	chartCandleWidth      = 3
+	chartCandleGap        = 1
+	chartStride           = chartCandleWidth + chartCandleGap
+	bullColorTag          = "#00c853"
+	bearColorTag          = "#e53935"
+	neutralColorTag       = "#9aa0a6"
 )
 
 type config struct {
-	Symbols     []string
-	ChartSymbol string
-	ChartLimit  int
-	Timeout     time.Duration
-	TZ          string
-	RESTBase    string
-	WSBase      string
-	NoColor     bool
-	RetryDelay  time.Duration
-	ConfigPath  string
+	Symbols        []string
+	ChartSymbol    string
+	ChartLimit     int
+	Timeout        time.Duration
+	TZ             string
+	RESTBase       string
+	WSBase         string
+	NoColor        bool
+	RetryDelay     time.Duration
+	AccountRefresh time.Duration
+	APIKey         string
+	APISecret      string
+	ConfigPath     string
 }
 
 type rawConfig struct {
-	Symbols     []string `toml:"symbols"`
-	ChartSymbol string   `toml:"chart_symbol"`
-	ChartLimit  int      `toml:"chart_limit"`
-	Timeout     string   `toml:"timeout"`
-	TZ          string   `toml:"tz"`
-	RESTBase    string   `toml:"rest_base"`
-	WSBase      string   `toml:"ws_base"`
-	NoColor     bool     `toml:"no_color"`
-	RetryDelay  string   `toml:"retry_delay"`
+	Symbols        []string `toml:"symbols"`
+	ChartSymbol    string   `toml:"chart_symbol"`
+	ChartLimit     int      `toml:"chart_limit"`
+	Timeout        string   `toml:"timeout"`
+	TZ             string   `toml:"tz"`
+	RESTBase       string   `toml:"rest_base"`
+	WSBase         string   `toml:"ws_base"`
+	NoColor        bool     `toml:"no_color"`
+	RetryDelay     string   `toml:"retry_delay"`
+	AccountRefresh string   `toml:"account_refresh"`
+	APIKey         string   `toml:"api_key"`
+	APISecret      string   `toml:"api_secret"`
+}
+
+func (cfg config) hasAccountAuth() bool {
+	return cfg.APIKey != "" && cfg.APISecret != ""
 }
 
 type wsEnvelope struct {
@@ -175,14 +191,44 @@ type priceTicker struct {
 	Time   int64  `json:"time"`
 }
 
+type positionRiskResponse struct {
+	Symbol           string `json:"symbol"`
+	PositionAmt      string `json:"positionAmt"`
+	EntryPrice       string `json:"entryPrice"`
+	MarkPrice        string `json:"markPrice"`
+	UnrealizedProfit string `json:"unRealizedProfit"`
+	LiquidationPrice string `json:"liquidationPrice"`
+	MarginType       string `json:"marginType"`
+	PositionSide     string `json:"positionSide"`
+	Leverage         string `json:"leverage"`
+	UpdateTime       int64  `json:"updateTime"`
+}
+
+type positionState struct {
+	Symbol           string
+	Side             string
+	Size             float64
+	EntryPrice       float64
+	MarkPrice        float64
+	UnrealizedPnL    float64
+	LiquidationPrice float64
+	MarginType       string
+	Leverage         string
+	UpdateTime       int64
+}
+
 type appState struct {
-	mu          sync.RWMutex
-	rows        map[string]rowState
-	chart       []klineCandle
-	chartSymbol string
-	startedAt   time.Time
-	lastError   string
-	lastUpdate  time.Time
+	mu                sync.RWMutex
+	rows              map[string]rowState
+	chart             []klineCandle
+	positions         []positionState
+	chartSymbol       string
+	startedAt         time.Time
+	lastError         string
+	accountError      string
+	lastUpdate        time.Time
+	accountLastUpdate time.Time
+	accountEnabled    bool
 }
 
 type uiModel struct {
@@ -191,6 +237,7 @@ type uiModel struct {
 	header      *tview.TextView
 	status      *tview.TextView
 	table       *tview.Table
+	positions   *tview.Table
 	chart       *tview.TextView
 	footer      *tview.TextView
 	help        tview.Primitive
@@ -208,7 +255,7 @@ func main() {
 	cfg := mustLoadConfig()
 	loc := mustLoadLocation(cfg.TZ)
 	client := &http.Client{Timeout: cfg.Timeout}
-	state := newAppState(cfg.Symbols)
+	state := newAppState(cfg.Symbols, cfg.hasAccountAuth())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -268,6 +315,20 @@ func loadConfig() (config, error) {
 		return config{}, fmt.Errorf("config %s field %q must be a valid positive duration", path, "retry_delay")
 	}
 
+	accountRefresh := defaultAccountRefresh
+	if value := strings.TrimSpace(raw.AccountRefresh); value != "" {
+		accountRefresh, err = time.ParseDuration(value)
+		if err != nil || accountRefresh <= 0 {
+			return config{}, fmt.Errorf("config %s field %q must be a valid positive duration", path, "account_refresh")
+		}
+	}
+
+	apiKey := strings.TrimSpace(raw.APIKey)
+	apiSecret := strings.TrimSpace(raw.APISecret)
+	if (apiKey == "") != (apiSecret == "") {
+		return config{}, fmt.Errorf("config %s requires both %q and %q when account auth is enabled", path, "api_key", "api_secret")
+	}
+
 	tz := strings.TrimSpace(raw.TZ)
 	if tz == "" {
 		return config{}, fmt.Errorf("config %s field %q cannot be empty", path, "tz")
@@ -282,16 +343,19 @@ func loadConfig() (config, error) {
 	}
 
 	return config{
-		Symbols:     symbols,
-		ChartSymbol: chartSymbol,
-		ChartLimit:  chartLimit,
-		Timeout:     timeout,
-		TZ:          tz,
-		RESTBase:    restBase,
-		WSBase:      wsBase,
-		NoColor:     raw.NoColor || os.Getenv("NO_COLOR") != "",
-		RetryDelay:  retryDelay,
-		ConfigPath:  path,
+		Symbols:        symbols,
+		ChartSymbol:    chartSymbol,
+		ChartLimit:     chartLimit,
+		Timeout:        timeout,
+		TZ:             tz,
+		RESTBase:       restBase,
+		WSBase:         wsBase,
+		NoColor:        raw.NoColor || os.Getenv("NO_COLOR") != "",
+		RetryDelay:     retryDelay,
+		AccountRefresh: accountRefresh,
+		APIKey:         apiKey,
+		APISecret:      apiSecret,
+		ConfigPath:     path,
 	}, nil
 }
 
@@ -322,6 +386,11 @@ func resolveConfigPath() (string, error) {
 func run(ctx context.Context, client *http.Client, cfg config, loc *time.Location, state *appState) error {
 	if err := loadChartHistory(ctx, client, cfg, state); err != nil {
 		state.setError(fmt.Sprintf("chart init failed: %v", err))
+	}
+	if cfg.hasAccountAuth() {
+		if err := syncPositions(ctx, client, cfg, state); err != nil {
+			state.setAccountError(fmt.Sprintf("positions init failed: %v", err))
+		}
 	}
 
 	var chartMu sync.RWMutex
@@ -376,6 +445,10 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 			}
 		}
 	}()
+
+	if cfg.hasAccountAuth() {
+		go runAccountLoop(ctx, client, cfg, state, ui.requestDraw)
+	}
 
 	go ui.runClock(ctx)
 
@@ -549,6 +622,157 @@ func loadChartHistory(ctx context.Context, client *http.Client, cfg config, stat
 	return loadChartHistoryForSymbol(ctx, client, cfg.RESTBase, cfg.ChartSymbol, cfg.ChartLimit, state)
 }
 
+func runAccountLoop(ctx context.Context, client *http.Client, cfg config, state *appState, notify func()) {
+	ticker := time.NewTicker(cfg.AccountRefresh)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := syncPositions(ctx, client, cfg, state); err != nil {
+				state.setAccountError(fmt.Sprintf("positions sync failed: %v", err))
+			} else {
+				state.clearAccountError()
+			}
+			notify()
+		}
+	}
+}
+
+func syncPositions(ctx context.Context, client *http.Client, cfg config, state *appState) error {
+	positions, err := fetchPositions(ctx, client, cfg)
+	if err != nil {
+		return err
+	}
+	state.setPositions(positions)
+	return nil
+}
+
+func fetchPositions(ctx context.Context, client *http.Client, cfg config) ([]positionState, error) {
+	query := url.Values{}
+	query.Set("timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	query.Set("recvWindow", strconv.FormatInt(int64(cfg.Timeout/time.Millisecond), 10))
+
+	endpoint, err := buildSignedURL(cfg.RESTBase, positionRiskPath, query, cfg.APISecret)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build positions request: %w", err)
+	}
+	req.Header.Set("X-MBX-APIKEY", cfg.APIKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send positions request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read positions response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("positions status %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var payload []positionRiskResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode positions response: %w", err)
+	}
+
+	positions := make([]positionState, 0, len(payload))
+	for _, item := range payload {
+		position, ok, err := parsePosition(item)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			positions = append(positions, position)
+		}
+	}
+
+	sort.Slice(positions, func(i, j int) bool {
+		if positions[i].Symbol == positions[j].Symbol {
+			return positions[i].Side < positions[j].Side
+		}
+		return positions[i].Symbol < positions[j].Symbol
+	})
+
+	return positions, nil
+}
+
+func parsePosition(item positionRiskResponse) (positionState, bool, error) {
+	size, err := strconv.ParseFloat(item.PositionAmt, 64)
+	if err != nil {
+		return positionState{}, false, fmt.Errorf("parse position size for %s: %w", item.Symbol, err)
+	}
+	if math.Abs(size) < 1e-12 {
+		return positionState{}, false, nil
+	}
+
+	entryPrice, err := strconv.ParseFloat(item.EntryPrice, 64)
+	if err != nil {
+		return positionState{}, false, fmt.Errorf("parse entry price for %s: %w", item.Symbol, err)
+	}
+	markPrice, err := strconv.ParseFloat(item.MarkPrice, 64)
+	if err != nil {
+		return positionState{}, false, fmt.Errorf("parse mark price for %s: %w", item.Symbol, err)
+	}
+	unrealizedPnL, err := strconv.ParseFloat(item.UnrealizedProfit, 64)
+	if err != nil {
+		return positionState{}, false, fmt.Errorf("parse unrealized pnl for %s: %w", item.Symbol, err)
+	}
+	liquidationPrice, err := strconv.ParseFloat(item.LiquidationPrice, 64)
+	if err != nil {
+		return positionState{}, false, fmt.Errorf("parse liquidation price for %s: %w", item.Symbol, err)
+	}
+
+	side := strings.ToUpper(strings.TrimSpace(item.PositionSide))
+	if side == "" || side == "BOTH" {
+		if size > 0 {
+			side = "LONG"
+		} else {
+			side = "SHORT"
+		}
+	}
+
+	return positionState{
+		Symbol:           strings.ToUpper(strings.TrimSpace(item.Symbol)),
+		Side:             side,
+		Size:             math.Abs(size),
+		EntryPrice:       entryPrice,
+		MarkPrice:        markPrice,
+		UnrealizedPnL:    unrealizedPnL,
+		LiquidationPrice: liquidationPrice,
+		MarginType:       strings.ToUpper(strings.TrimSpace(item.MarginType)),
+		Leverage:         strings.TrimSpace(item.Leverage),
+		UpdateTime:       item.UpdateTime,
+	}, true, nil
+}
+
+func buildSignedURL(baseURL, path string, query url.Values, secret string) (string, error) {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("parse base url: %w", err)
+	}
+	parsed.Path = path
+	encoded := query.Encode()
+	parsed.RawQuery = encoded + "&signature=" + signQuery(encoded, secret)
+	return parsed.String(), nil
+}
+
+func signQuery(payload, secret string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(payload))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 func loadChartHistoryForSymbol(ctx context.Context, client *http.Client, baseURL, symbol string, limit int, state *appState) error {
 	klines, err := fetchKlines(ctx, client, baseURL, symbol, limit)
 	if err != nil {
@@ -711,12 +935,12 @@ func buildWSURL(baseURL string, symbols []string, chartSymbol string) string {
 	return baseURL + "/stream?streams=" + strings.Join(streams, "/")
 }
 
-func newAppState(symbols []string) *appState {
+func newAppState(symbols []string, accountEnabled bool) *appState {
 	rows := make(map[string]rowState, len(symbols))
 	for _, symbol := range symbols {
 		rows[symbol] = rowState{Symbol: symbol, Status: "waiting"}
 	}
-	return &appState{rows: rows, startedAt: time.Now()}
+	return &appState{rows: rows, startedAt: time.Now(), accountEnabled: accountEnabled}
 }
 
 func (s *appState) setChart(symbol string, candles []klineCandle) {
@@ -817,7 +1041,26 @@ func (s *appState) clearError() {
 	s.lastError = ""
 }
 
-func (s *appState) snapshot() ([]rowState, []klineCandle, string, string, time.Time, time.Time) {
+func (s *appState) setPositions(positions []positionState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.positions = append([]positionState(nil), positions...)
+	s.accountLastUpdate = time.Now()
+}
+
+func (s *appState) setAccountError(message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.accountError = message
+}
+
+func (s *appState) clearAccountError() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.accountError = ""
+}
+
+func (s *appState) snapshot() ([]rowState, []klineCandle, []positionState, string, string, string, time.Time, time.Time, time.Time, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -828,7 +1071,8 @@ func (s *appState) snapshot() ([]rowState, []klineCandle, string, string, time.T
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Symbol < rows[j].Symbol })
 
 	chart := append([]klineCandle(nil), s.chart...)
-	return rows, chart, s.chartSymbol, s.lastError, s.startedAt, s.lastUpdate
+	positions := append([]positionState(nil), s.positions...)
+	return rows, chart, positions, s.chartSymbol, s.lastError, s.accountError, s.startedAt, s.lastUpdate, s.accountLastUpdate, s.accountEnabled
 }
 
 func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int)) *uiModel {
@@ -849,6 +1093,7 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 	header := tview.NewTextView().SetDynamicColors(true)
 	status := tview.NewTextView().SetDynamicColors(true)
 	table := tview.NewTable().SetBorders(false).SetSelectable(false, false).SetFixed(1, 0)
+	positions := tview.NewTable().SetBorders(false).SetSelectable(false, false).SetFixed(1, 0)
 	chart := tview.NewTextView().SetDynamicColors(true)
 	footer := tview.NewTextView().SetDynamicColors(true)
 	helpTable := tview.NewTable().SetBorders(false).SetSelectable(false, false)
@@ -907,16 +1152,18 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 	header.SetBackgroundColor(tcell.ColorDefault)
 	status.SetBackgroundColor(tcell.ColorDefault)
 	table.SetBackgroundColor(tcell.ColorDefault)
+	positions.SetBackgroundColor(tcell.ColorDefault)
 	chart.SetBackgroundColor(tcell.ColorDefault)
 	footer.SetBackgroundColor(tcell.ColorDefault)
 	header.SetBorder(true).SetTitle("Overview")
 	status.SetBorder(true).SetTitle("Status")
 	table.SetBorder(true).SetTitle("Contracts")
+	positions.SetBorder(true).SetTitle("Positions")
 	chart.SetBorder(true).SetTitle("1H Chart")
 	footer.SetBorder(true)
 	footer.SetText("/ or h help | Up/Down switch chart | q / Ctrl+C quit")
 
-	ui := &uiModel{app: app, header: header, status: status, table: table, chart: chart, footer: footer, help: help, cfg: cfg, loc: loc, state: state, changeChart: changeChart}
+	ui := &uiModel{app: app, header: header, status: status, table: table, positions: positions, chart: chart, footer: footer, help: help, cfg: cfg, loc: loc, state: state, changeChart: changeChart}
 	ui.refresh()
 	ui.pages = tview.NewPages().
 		AddPage("main", ui.layout(), true, true).
@@ -967,13 +1214,17 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 }
 
 func (ui *uiModel) layout() tview.Primitive {
+	left := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(ui.table, 0, 4, false).
+		AddItem(ui.positions, 0, 5, false)
+
 	body := tview.NewFlex().SetDirection(tview.FlexColumn).
-		AddItem(ui.table, 0, 3, false).
+		AddItem(left, 0, 3, false).
 		AddItem(ui.chart, 0, 2, false)
 
 	content := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(ui.header, 5, 0, false).
-		AddItem(ui.status, 4, 0, false).
+		AddItem(ui.header, 6, 0, false).
+		AddItem(ui.status, 5, 0, false).
 		AddItem(body, 0, 1, false).
 		AddItem(ui.footer, 3, 0, false)
 	return content
@@ -1015,26 +1266,48 @@ func (ui *uiModel) requestDraw() {
 }
 
 func (ui *uiModel) refresh() {
-	rows, chart, chartSymbol, lastError, startedAt, lastUpdate := ui.state.snapshot()
+	rows, chart, positions, chartSymbol, lastError, accountError, startedAt, lastUpdate, accountLastUpdate, accountEnabled := ui.state.snapshot()
+
+	accountMode := "disabled"
+	if accountEnabled {
+		accountMode = fmt.Sprintf("enabled | refresh %s", ui.cfg.AccountRefresh)
+	}
 
 	ui.header.SetText(fmt.Sprintf(
-		"mode: ws\nsymbols: %s\nconfig: %s\nnow: %s\nstarted: %s\nlast update: %s",
+		"mode: ws\nsymbols: %s\nchart: %s\naccount: %s\nconfig: %s\nnow: %s\nstarted: %s\nmarket update: %s",
 		strings.Join(ui.cfg.Symbols, ","),
+		chartSymbolOrDefault(chartSymbol, ui.cfg.ChartSymbol),
+		accountMode,
 		ui.cfg.ConfigPath,
 		formatTime(time.Now(), ui.loc, false),
 		formatTime(startedAt, ui.loc, false),
 		formatOptionalTime(lastUpdate, ui.loc),
 	))
 
-	statusText := "[green]ok[-]"
+	marketStatus := "[green]ok[-]"
 	if lastError != "" {
-		statusText = ui.colorize("red", lastError)
+		marketStatus = ui.colorize("red", lastError)
 	}
+	accountStatus := ui.accountStatusText(accountEnabled, accountError, accountLastUpdate)
 	transport := fmt.Sprintf("retry delay=%s | ws=%s | rest=%s", ui.cfg.RetryDelay, ui.cfg.WSBase, ui.cfg.RESTBase)
-	ui.status.SetText(fmt.Sprintf("status: %s\n%s", statusText, transport))
+	ui.status.SetText(fmt.Sprintf("market: %s\naccount: %s\n%s", marketStatus, accountStatus, transport))
 
 	ui.renderTable(rows)
+	ui.renderPositions(positions, accountEnabled, accountError, accountLastUpdate)
 	ui.renderChart(chart, chartSymbol)
+}
+
+func (ui *uiModel) accountStatusText(accountEnabled bool, accountError string, accountLastUpdate time.Time) string {
+	if !accountEnabled {
+		return ui.colorize("gray", "disabled")
+	}
+	if accountError != "" {
+		return ui.colorize("red", accountError)
+	}
+	if accountLastUpdate.IsZero() {
+		return ui.colorize("yellow", "waiting for initial sync")
+	}
+	return ui.colorize("green", fmt.Sprintf("ok | last sync %s", formatOptionalTime(accountLastUpdate, ui.loc)))
 }
 
 func (ui *uiModel) renderTable(rows []rowState) {
@@ -1068,6 +1341,56 @@ func (ui *uiModel) renderTable(rows []rowState) {
 	}
 }
 
+func (ui *uiModel) renderPositions(positions []positionState, accountEnabled bool, accountError string, accountLastUpdate time.Time) {
+	ui.positions.Clear()
+	headers := []string{"SYMBOL", "SIDE", "SIZE", "ENTRY", "MARK", "UPNL", "LIQ", "MODE"}
+	for col, header := range headers {
+		cell := tview.NewTableCell(header).
+			SetSelectable(false).
+			SetAttributes(tcell.AttrBold).
+			SetBackgroundColor(tcell.ColorDefault)
+		if !ui.cfg.NoColor {
+			cell.SetTextColor(tcell.ColorYellow)
+		}
+		ui.positions.SetCell(0, col, cell)
+	}
+
+	if !accountEnabled {
+		ui.positions.SetCell(1, 0, tview.NewTableCell("API credentials not configured").SetSelectable(false).SetExpansion(1).SetBackgroundColor(tcell.ColorDefault))
+		return
+	}
+
+	if accountError != "" && len(positions) == 0 {
+		ui.positions.SetCell(1, 0, tview.NewTableCell(ui.colorize("red", accountError)).SetSelectable(false).SetExpansion(1).SetBackgroundColor(tcell.ColorDefault))
+		return
+	}
+
+	if len(positions) == 0 {
+		message := "No open positions"
+		if !accountLastUpdate.IsZero() {
+			message = fmt.Sprintf("No open positions | last sync %s", formatOptionalTime(accountLastUpdate, ui.loc))
+		}
+		ui.positions.SetCell(1, 0, tview.NewTableCell(message).SetSelectable(false).SetExpansion(1).SetBackgroundColor(tcell.ColorDefault))
+		return
+	}
+
+	for i, position := range positions {
+		mode := strings.ToLower(position.MarginType)
+		if position.Leverage != "" {
+			mode = fmt.Sprintf("%s %sx", mode, position.Leverage)
+		}
+
+		ui.positions.SetCell(i+1, 0, tview.NewTableCell(position.Symbol).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.positions.SetCell(i+1, 1, tview.NewTableCell(ui.colorBySide(position.Side, position.Side)).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.positions.SetCell(i+1, 2, tview.NewTableCell(formatCompactFloat(position.Size)).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.positions.SetCell(i+1, 3, tview.NewTableCell(formatCompactFloat(position.EntryPrice)).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.positions.SetCell(i+1, 4, tview.NewTableCell(formatCompactFloat(position.MarkPrice)).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.positions.SetCell(i+1, 5, tview.NewTableCell(ui.colorByChange(compareFloat(position.UnrealizedPnL, 0), formatSignedCompactFloat(position.UnrealizedPnL))).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.positions.SetCell(i+1, 6, tview.NewTableCell(formatOptionalCompactFloat(position.LiquidationPrice)).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.positions.SetCell(i+1, 7, tview.NewTableCell(mode).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+	}
+}
+
 func (ui *uiModel) renderChart(candles []klineCandle, symbol string) {
 	if symbol == "" {
 		symbol = ui.cfg.ChartSymbol
@@ -1097,18 +1420,41 @@ func (ui *uiModel) colorByChange(change int, text string) string {
 	}
 }
 
+func (ui *uiModel) colorBySide(side, text string) string {
+	if ui.cfg.NoColor {
+		return text
+	}
+	switch strings.ToUpper(strings.TrimSpace(side)) {
+	case "LONG":
+		return fmt.Sprintf("[%s]%s[-]", bullColorTag, escapeTView(text))
+	case "SHORT":
+		return fmt.Sprintf("[%s]%s[-]", bearColorTag, escapeTView(text))
+	default:
+		return fmt.Sprintf("[%s]%s[-]", neutralColorTag, escapeTView(text))
+	}
+}
+
 func escapeTView(text string) string {
 	replacer := strings.NewReplacer("[", "[[", "]", "]]")
 	return replacer.Replace(text)
 }
 
 func printSnapshot(cfg config, loc *time.Location, state *appState) {
-	rows, chart, chartSymbol, lastError, startedAt, lastUpdate := state.snapshot()
+	rows, chart, positions, chartSymbol, lastError, accountError, startedAt, lastUpdate, accountLastUpdate, accountEnabled := state.snapshot()
 	fmt.Printf("mode: ws\nsymbols: %s\nconfig: %s\nstarted: %s\nlast update: %s\n", strings.Join(cfg.Symbols, ","), cfg.ConfigPath, formatTime(startedAt, loc, false), formatOptionalTime(lastUpdate, loc))
 	if lastError == "" {
 		fmt.Println("status: ok")
 	} else {
 		fmt.Printf("status: %s\n", lastError)
+	}
+	if accountEnabled {
+		if accountError == "" {
+			fmt.Printf("account: ok | last sync: %s\n", formatOptionalTime(accountLastUpdate, loc))
+		} else {
+			fmt.Printf("account: %s\n", accountError)
+		}
+	} else {
+		fmt.Println("account: disabled")
 	}
 	fmt.Printf("%-14s %-18s %-18s %-26s %-26s\n", "SYMBOL", "PRICE", "DELTA", "EXCHANGE_TIME", "LOCAL_UPDATE")
 	for _, row := range rows {
@@ -1117,6 +1463,17 @@ func printSnapshot(cfg config, loc *time.Location, state *appState) {
 			price = "-"
 		}
 		fmt.Printf("%-14s %-18s %-18s %-26s %-26s\n", row.Symbol, price, formatDelta(row), formatEpoch(row.ExchangeTime, loc), formatOptionalTime(row.LocalTime, loc))
+	}
+	if len(positions) > 0 {
+		fmt.Println("\nPOSITIONS")
+		fmt.Printf("%-12s %-8s %-12s %-12s %-12s %-12s %-12s %-12s\n", "SYMBOL", "SIDE", "SIZE", "ENTRY", "MARK", "UPNL", "LIQ", "MODE")
+		for _, position := range positions {
+			mode := strings.ToLower(position.MarginType)
+			if position.Leverage != "" {
+				mode = fmt.Sprintf("%s %sx", mode, position.Leverage)
+			}
+			fmt.Printf("%-12s %-8s %-12s %-12s %-12s %-12s %-12s %-12s\n", position.Symbol, position.Side, formatCompactFloat(position.Size), formatCompactFloat(position.EntryPrice), formatCompactFloat(position.MarkPrice), formatSignedCompactFloat(position.UnrealizedPnL), formatOptionalCompactFloat(position.LiquidationPrice), mode)
+		}
 	}
 	if len(chart) > 0 {
 		fmt.Printf("\n1H chart (%s):\n%s\n", chartSymbol, stripTViewTags(buildChartText(chart, true)))
@@ -1237,6 +1594,58 @@ func maxInt(a, b int) int {
 func stripTViewTags(text string) string {
 	replacer := strings.NewReplacer("["+bullColorTag+"]", "", "["+bearColorTag+"]", "", "["+neutralColorTag+"]", "", "[-]", "")
 	return replacer.Replace(text)
+}
+
+func chartSymbolOrDefault(symbol, fallback string) string {
+	if symbol == "" {
+		return fallback
+	}
+	return symbol
+}
+
+func formatCompactFloat(value float64) string {
+	abs := math.Abs(value)
+	precision := 6
+	switch {
+	case abs >= 1000:
+		precision = 2
+	case abs >= 1:
+		precision = 4
+	case abs >= 0.01:
+		precision = 5
+	}
+	return trimTrailingZeros(strconv.FormatFloat(value, 'f', precision, 64))
+}
+
+func formatSignedCompactFloat(value float64) string {
+	formatted := formatCompactFloat(math.Abs(value))
+	switch {
+	case value > 0:
+		return "+" + formatted
+	case value < 0:
+		return "-" + formatted
+	default:
+		return formatted
+	}
+}
+
+func formatOptionalCompactFloat(value float64) string {
+	if math.Abs(value) < 1e-12 {
+		return "-"
+	}
+	return formatCompactFloat(value)
+}
+
+func trimTrailingZeros(value string) string {
+	if !strings.Contains(value, ".") {
+		return value
+	}
+	value = strings.TrimRight(value, "0")
+	value = strings.TrimRight(value, ".")
+	if value == "-0" || value == "+0" || value == "" {
+		return "0"
+	}
+	return value
 }
 
 func formatDelta(row rowState) string {
