@@ -30,16 +30,24 @@ If no config file is found, or any required field is missing, the program exits 
 
 An example config is included here: [config.example.toml](./config.example.toml)
 
-## Run
+## Installation
+
+### Homebrew (macOS / Linux)
 
 ```bash
-cd /Users/acaibird/Developer/tmp/binance-ticker
-go run .
+brew tap byteoxo/tap
+brew install binance-ticker
 ```
 
-Build the binary:
+### Pre-built binaries
+
+Download the latest release for your platform from the [Releases](https://github.com/byteoxo/binance-ticker/releases) page.
+
+### Build from source
 
 ```bash
+git clone https://github.com/byteoxo/binance-ticker.git
+cd binance-ticker
 go build -o binance-ticker .
 ./binance-ticker
 ```
