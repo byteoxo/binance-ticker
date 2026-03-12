@@ -1,12 +1,12 @@
-# BFT
+# Binance Ticker
 
 [中文文档](./README.zh-CN.md)
 
-`bft` is a terminal-based Binance market viewer written in Go. It focuses on realtime futures and spot monitoring with live 1-hour candlestick charts, rendered with a `tview/tcell` TUI.
+`binance-ticker` is a terminal-based Binance market viewer written in Go. It focuses on realtime futures and spot monitoring with live 1-hour candlestick charts, rendered with a `tview/tcell` TUI.
 
 ## Preview
 
-<img src="./assets/screenhot.png" alt="BFT Screenshot" width="760">
+<img src="./assets/screenhot.png" alt="Binance Ticker Screenshot" width="760">
 
 ## Features
 
@@ -40,8 +40,8 @@ go run .
 Build the binary:
 
 ```bash
-go build -o bft .
-./bft
+go build -o binance-ticker .
+./binance-ticker
 ```
 
 ## Config Fields
