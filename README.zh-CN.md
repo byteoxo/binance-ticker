@@ -41,6 +41,12 @@ brew tap byteoxo/tap
 brew install binance-ticker
 ```
 
+安装后 `bt` 和 `binance-ticker` 均可使用：
+
+```bash
+bt
+```
+
 ### 下载预编译二进制
 
 从 [Releases](https://github.com/byteoxo/binance-ticker/releases) 页面下载对应平台的压缩包。
