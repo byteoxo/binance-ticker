@@ -30,55 +30,67 @@ import (
 )
 
 const (
-	defaultWSBaseURL           = "wss://fstream.binance.com"
-	defaultRESTBaseURL         = "https://fapi.binance.com"
-	klinePath                  = "/fapi/v1/klines"
-	positionRiskPath           = "/fapi/v3/positionRisk"
-	listenKeyPath              = "/fapi/v1/listenKey"
-	defaultTimeout             = 8 * time.Second
-	userDataKeepaliveInterval  = 50 * time.Minute
-	uiRefreshInterval          = time.Second
-	defaultChartLimit     = 48
-	defaultChartHeight    = 12
-	chartCandleWidth      = 3
-	chartCandleGap        = 1
-	chartStride           = chartCandleWidth + chartCandleGap
-	bullColorTag          = "#00c853"
-	bearColorTag          = "#e53935"
-	neutralColorTag       = "#9aa0a6"
+	defaultWSBaseURL          = "wss://fstream.binance.com"
+	defaultRESTBaseURL        = "https://fapi.binance.com"
+	defaultSpotWSBaseURL      = "wss://stream.binance.com:9443"
+	defaultSpotRESTBaseURL    = "https://api.binance.com"
+	klinePath                 = "/fapi/v1/klines"
+	positionRiskPath          = "/fapi/v3/positionRisk"
+	listenKeyPath             = "/fapi/v1/listenKey"
+	spotAccountPath           = "/api/v3/account"
+	defaultSpotWSAPIBaseURL   = "wss://ws-api.binance.com:443/ws-api/v3"
+	defaultTimeout            = 8 * time.Second
+	userDataKeepaliveInterval = 50 * time.Minute
+	uiRefreshInterval         = time.Second
+	defaultChartLimit         = 48
+	defaultChartHeight        = 12
+	chartCandleWidth          = 3
+	chartCandleGap            = 1
+	chartStride               = chartCandleWidth + chartCandleGap
+	bullColorTag              = "#00c853"
+	bearColorTag              = "#e53935"
+	neutralColorTag           = "#9aa0a6"
 )
 
 type config struct {
-	Symbols     []string
-	ChartSymbol string
-	ChartLimit  int
-	Timeout     time.Duration
-	TZ          string
-	RESTBase    string
-	WSBase      string
-	NoColor     bool
-	RetryDelay  time.Duration
-	APIKey      string
-	APISecret   string
-	ConfigPath  string
+	Symbols      []string
+	SpotSymbols  []string
+	ChartSymbol  string
+	ChartLimit   int
+	DefaultPanel string
+	Timeout      time.Duration
+	TZ           string
+	RESTBase     string
+	WSBase       string
+	NoColor      bool
+	RetryDelay   time.Duration
+	APIKey       string
+	APISecret    string
+	ConfigPath   string
 }
 
 type rawConfig struct {
-	Symbols     []string `toml:"symbols"`
-	ChartSymbol string   `toml:"chart_symbol"`
-	ChartLimit  int      `toml:"chart_limit"`
-	Timeout     string   `toml:"timeout"`
-	TZ          string   `toml:"tz"`
-	RESTBase    string   `toml:"rest_base"`
-	WSBase      string   `toml:"ws_base"`
-	NoColor     bool     `toml:"no_color"`
-	RetryDelay  string   `toml:"retry_delay"`
-	APIKey      string   `toml:"api_key"`
-	APISecret   string   `toml:"api_secret"`
+	Symbols      []string `toml:"symbols"`
+	SpotSymbols  []string `toml:"spot_symbols"`
+	ChartSymbol  string   `toml:"chart_symbol"`
+	ChartLimit   int      `toml:"chart_limit"`
+	DefaultPanel string   `toml:"default_panel"`
+	Timeout      string   `toml:"timeout"`
+	TZ           string   `toml:"tz"`
+	RESTBase     string   `toml:"rest_base"`
+	WSBase       string   `toml:"ws_base"`
+	NoColor      bool     `toml:"no_color"`
+	RetryDelay   string   `toml:"retry_delay"`
+	APIKey       string   `toml:"api_key"`
+	APISecret    string   `toml:"api_secret"`
 }
 
 func (cfg config) hasAccountAuth() bool {
 	return cfg.APIKey != "" && cfg.APISecret != ""
+}
+
+func (cfg config) hasSpot() bool {
+	return len(cfg.SpotSymbols) > 0
 }
 
 type wsEnvelope struct {
@@ -128,6 +140,39 @@ type userDataPositionPayload struct {
 	UnrealizedProfit jsonFlexibleString `json:"up"`
 	MarginType       string             `json:"mt"`
 	PositionSide     string             `json:"ps"`
+}
+
+type spotUserDataEvent struct {
+	EventType string `json:"e"`
+}
+
+type spotOutboundAccountPositionEvent struct {
+	EventType  string                     `json:"e"`
+	EventTime  jsonFlexibleInt64          `json:"E"`
+	UpdateTime jsonFlexibleInt64          `json:"u"`
+	Balances   []spotBalanceUpdatePayload `json:"B"`
+}
+
+type spotBalanceUpdatePayload struct {
+	Asset  string             `json:"a"`
+	Free   jsonFlexibleString `json:"f"`
+	Locked jsonFlexibleString `json:"l"`
+}
+
+type spotAssetDeltaEvent struct {
+	EventType string             `json:"e"`
+	EventTime jsonFlexibleInt64  `json:"E"`
+	Asset     string             `json:"a"`
+	Delta     jsonFlexibleString `json:"d"`
+	ClearTime jsonFlexibleInt64  `json:"T"`
+}
+
+type spotBalanceUpdate struct {
+	Asset      string
+	Free       float64
+	Locked     float64
+	UpdateTime int64
+	Remove     bool
 }
 
 type jsonFlexibleInt64 int64
@@ -256,18 +301,55 @@ type positionUpdate struct {
 	Remove        bool
 }
 
+type spotBalance struct {
+	Asset          string
+	Free           float64
+	Locked         float64
+	Total          float64
+	QuoteValue     float64
+	QuoteValueText string
+	PriceSymbol    string
+	PriceValue     float64
+	LocalUpdate    time.Time
+}
+
+type spotAccountResponse struct {
+	Balances []spotBalancePayload `json:"balances"`
+}
+
+type spotBalancePayload struct {
+	Asset  string `json:"asset"`
+	Free   string `json:"free"`
+	Locked string `json:"locked"`
+}
+
+type panelMode string
+
+const (
+	panelFutures panelMode = "futures"
+	panelSpot    panelMode = "spot"
+)
+
 type appState struct {
-	mu                sync.RWMutex
-	rows              map[string]rowState
-	chart             []klineCandle
-	positions         []positionState
-	chartSymbol       string
-	startedAt         time.Time
-	lastError         string
-	accountError      string
-	lastUpdate        time.Time
-	accountLastUpdate time.Time
-	accountEnabled    bool
+	mu                    sync.RWMutex
+	rows                  map[string]rowState
+	spotRows              map[string]rowState
+	chart                 []klineCandle
+	positions             []positionState
+	spotBalances          []spotBalance
+	chartSymbol           string
+	panel                 panelMode
+	modalMessage          string
+	startedAt             time.Time
+	lastError             string
+	spotError             string
+	accountError          string
+	spotAccountError      string
+	lastUpdate            time.Time
+	spotLastUpdate        time.Time
+	accountLastUpdate     time.Time
+	spotAccountLastUpdate time.Time
+	accountEnabled        bool
 }
 
 type uiModel struct {
@@ -294,7 +376,7 @@ func main() {
 	cfg := mustLoadConfig()
 	loc := mustLoadLocation(cfg.TZ)
 	client := &http.Client{Timeout: cfg.Timeout}
-	state := newAppState(cfg.Symbols, cfg.hasAccountAuth())
+	state := newAppState(cfg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -324,7 +406,7 @@ func loadConfig() (config, error) {
 		return config{}, fmt.Errorf("decode config %s: %w", path, err)
 	}
 
-	required := []string{"symbols", "chart_symbol", "chart_limit", "timeout", "tz", "rest_base", "ws_base", "no_color", "retry_delay"}
+	required := []string{"symbols", "chart_symbol", "chart_limit", "default_panel", "timeout", "tz", "rest_base", "ws_base", "no_color", "retry_delay"}
 	for _, key := range required {
 		if !meta.IsDefined(key) {
 			return config{}, fmt.Errorf("config %s missing required field %q", path, key)
@@ -332,17 +414,26 @@ func loadConfig() (config, error) {
 	}
 
 	symbols := normalizeSymbols(strings.Join(raw.Symbols, ","))
-	if len(symbols) == 0 {
-		return config{}, fmt.Errorf("config %s has no valid symbols", path)
+	spotSymbols := normalizeSymbols(strings.Join(raw.SpotSymbols, ","))
+	if len(symbols) == 0 && len(spotSymbols) == 0 {
+		return config{}, fmt.Errorf("config %s must define at least one of %q or %q", path, "symbols", "spot_symbols")
 	}
 
 	chartSymbol := strings.ToUpper(strings.TrimSpace(raw.ChartSymbol))
-	if chartSymbol == "" {
-		return config{}, fmt.Errorf("config %s field %q cannot be empty", path, "chart_symbol")
+	if chartSymbol == "" && len(symbols) > 0 {
+		return config{}, fmt.Errorf("config %s field %q cannot be empty when futures symbols are configured", path, "chart_symbol")
 	}
 	chartLimit := raw.ChartLimit
-	if chartLimit <= 0 {
-		return config{}, fmt.Errorf("config %s field %q must be greater than 0", path, "chart_limit")
+	if len(symbols) > 0 && chartLimit <= 0 {
+		return config{}, fmt.Errorf("config %s field %q must be greater than 0 when futures symbols are configured", path, "chart_limit")
+	}
+	if len(symbols) == 0 && chartLimit <= 0 {
+		chartLimit = defaultChartLimit
+	}
+
+	defaultPanel := panelMode(strings.ToLower(strings.TrimSpace(raw.DefaultPanel)))
+	if defaultPanel != panelFutures && defaultPanel != panelSpot {
+		return config{}, fmt.Errorf("config %s field %q must be one of %q or %q", path, "default_panel", panelFutures, panelSpot)
 	}
 
 	timeout, err := time.ParseDuration(strings.TrimSpace(raw.Timeout))
@@ -374,18 +465,20 @@ func loadConfig() (config, error) {
 	}
 
 	return config{
-		Symbols:        symbols,
-		ChartSymbol:    chartSymbol,
-		ChartLimit:     chartLimit,
-		Timeout:        timeout,
-		TZ:             tz,
-		RESTBase:       restBase,
-		WSBase:         wsBase,
-		NoColor:    raw.NoColor || os.Getenv("NO_COLOR") != "",
-		RetryDelay: retryDelay,
-		APIKey:      apiKey,
-		APISecret:   apiSecret,
-		ConfigPath:  path,
+		Symbols:      symbols,
+		SpotSymbols:  spotSymbols,
+		ChartSymbol:  chartSymbol,
+		ChartLimit:   chartLimit,
+		DefaultPanel: string(defaultPanel),
+		Timeout:      timeout,
+		TZ:           tz,
+		RESTBase:     restBase,
+		WSBase:       wsBase,
+		NoColor:      raw.NoColor || os.Getenv("NO_COLOR") != "",
+		RetryDelay:   retryDelay,
+		APIKey:       apiKey,
+		APISecret:    apiSecret,
+		ConfigPath:   path,
 	}, nil
 }
 
@@ -414,12 +507,20 @@ func resolveConfigPath() (string, error) {
 }
 
 func run(ctx context.Context, client *http.Client, cfg config, loc *time.Location, state *appState) error {
-	if err := loadChartHistory(ctx, client, cfg, state); err != nil {
-		state.setError(fmt.Sprintf("chart init failed: %v", err))
+	if len(cfg.Symbols) > 0 {
+		if err := loadChartHistory(ctx, client, cfg, state); err != nil {
+			state.setError(fmt.Sprintf("chart init failed: %v", err))
+		}
 	}
-	if cfg.hasAccountAuth() {
+	if cfg.hasAccountAuth() && len(cfg.Symbols) > 0 {
 		if err := loadInitialPositions(ctx, client, cfg, state); err != nil {
 			state.setAccountError(fmt.Sprintf("positions init failed: %v", err))
+		}
+	}
+	if cfg.hasSpot() {
+		state.setSpotRows(spotSymbolsToTickers(cfg.SpotSymbols))
+		if err := loadInitialSpotBalances(ctx, client, cfg, state); err != nil {
+			state.setSpotAccountError(fmt.Sprintf("spot balances init failed: %v", err))
 		}
 	}
 
@@ -436,7 +537,7 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 		return chartSymbol
 	}
 	getTickerSymbols := func() []string {
-		_, _, positions, _, _, _, _, _, _, _ := state.snapshot()
+		_, _, _, positions, _, _, _, _, _, _, _, _, _, _, _, _, _, _ := state.snapshot()
 		combined := make([]string, 0, len(cfg.Symbols)+len(positions))
 		combined = append(combined, cfg.Symbols...)
 		for _, position := range positions {
@@ -444,8 +545,15 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 		}
 		return normalizeSymbolList(combined)
 	}
+	getSpotTickerSymbols := func() []string {
+		return spotSymbolsToTickers(cfg.SpotSymbols)
+	}
 
 	changeChart := func(offset int) {
+		if len(cfg.Symbols) == 0 {
+			state.setModal("Futures is not configured")
+			return
+		}
 		current := getChartSymbol()
 		idx := indexOfSymbol(cfg.Symbols, current)
 		if idx < 0 {
@@ -475,18 +583,34 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 		})
 	}()
 
-	go func() {
-		err := runWSLoop(ctx, cfg, state, ui.requestDraw, getChartSymbol, getTickerSymbols)
-		if err != nil {
-			select {
-			case errCh <- err:
-			default:
+	if len(cfg.Symbols) > 0 {
+		go func() {
+			err := runWSLoop(ctx, cfg, state, ui.requestDraw, getChartSymbol, getTickerSymbols)
+			if err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
 			}
-		}
-	}()
+		}()
+	}
 
-	if cfg.hasAccountAuth() {
+	if cfg.hasAccountAuth() && len(cfg.Symbols) > 0 {
 		go runUserDataLoop(ctx, client, cfg, state, ui.requestDraw)
+	}
+	if cfg.hasAccountAuth() && cfg.hasSpot() {
+		go runSpotUserDataLoop(ctx, client, cfg, state, ui.requestDraw)
+	}
+	if cfg.hasSpot() {
+		go func() {
+			err := runSpotWSLoop(ctx, cfg, state, ui.requestDraw, getSpotTickerSymbols)
+			if err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+			}
+		}()
 	}
 
 	go ui.runClock(ctx)
@@ -614,6 +738,191 @@ func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), 
 			}
 		}
 	}
+}
+
+func runSpotWSLoop(ctx context.Context, cfg config, state *appState, notify func(), getSpotTickerSymbols func() []string) error {
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		state.setSpotError("connecting spot websocket...")
+		notify()
+
+		err := consumeSpotWS(ctx, cfg, state, notify, getSpotTickerSymbols)
+		if err == nil || ctx.Err() != nil {
+			return nil
+		}
+		if errors.Is(err, errResubscribe) {
+			continue
+		}
+
+		state.setSpotError(fmt.Sprintf("spot websocket disconnected: %v | retry in %s", err, cfg.RetryDelay))
+		notify()
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(cfg.RetryDelay):
+		}
+	}
+}
+
+func consumeSpotWS(ctx context.Context, cfg config, state *appState, notify func(), getSpotTickerSymbols func() []string) error {
+	endpoint := buildWSURL(defaultSpotWSBaseURL, getSpotTickerSymbols(), "")
+	dialer := websocket.Dialer{HandshakeTimeout: cfg.Timeout}
+	conn, _, err := dialer.DialContext(ctx, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("dial spot websocket: %w", err)
+	}
+	defer conn.Close()
+
+	state.clearSpotError()
+	notify()
+
+	conn.SetReadLimit(1 << 20)
+	_ = conn.SetReadDeadline(time.Now().Add(2 * cfg.Timeout))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(2 * cfg.Timeout))
+	})
+
+	pingTicker := time.NewTicker(cfg.Timeout)
+	defer pingTicker.Stop()
+	resubscribeTicker := time.NewTicker(time.Second)
+	defer resubscribeTicker.Stop()
+	baselineSymbols := strings.Join(getSpotTickerSymbols(), ",")
+
+	readErrCh := make(chan error, 1)
+	go func() {
+		defer close(readErrCh)
+		for {
+			var envelope wsEnvelope
+			if err := conn.ReadJSON(&envelope); err != nil {
+				readErrCh <- err
+				return
+			}
+			if strings.HasSuffix(envelope.Stream, "@ticker") {
+				ticker, err := parseWSTicker(envelope.Data)
+				if err != nil {
+					readErrCh <- fmt.Errorf("decode spot websocket ticker payload: %w", err)
+					return
+				}
+				state.applySpotTicker(ticker)
+				notify()
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutdown"), time.Now().Add(time.Second))
+			return nil
+		case err := <-readErrCh:
+			if err == nil {
+				return nil
+			}
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) || errors.Is(err, netErrClosed) {
+				return err
+			}
+			return err
+		case <-pingTicker.C:
+			if err := conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(time.Second)); err != nil {
+				return fmt.Errorf("ping spot websocket: %w", err)
+			}
+		case <-resubscribeTicker.C:
+			currentSymbols := strings.Join(getSpotTickerSymbols(), ",")
+			if currentSymbols != baselineSymbols {
+				state.setSpotError("updating spot subscriptions...")
+				notify()
+				return errResubscribe
+			}
+		}
+	}
+}
+
+func loadInitialSpotBalances(ctx context.Context, client *http.Client, cfg config, state *appState) error {
+	balances, err := fetchSpotBalances(ctx, client, cfg)
+	if err != nil {
+		return err
+	}
+	state.setSpotBalances(balances)
+	return nil
+}
+
+func fetchSpotBalances(ctx context.Context, client *http.Client, cfg config) ([]spotBalance, error) {
+	if !cfg.hasAccountAuth() {
+		return nil, nil
+	}
+	query := url.Values{}
+	query.Set("timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	query.Set("recvWindow", strconv.FormatInt(int64(cfg.Timeout/time.Millisecond), 10))
+	query.Set("omitZeroBalances", "true")
+
+	endpoint, err := buildSignedURL(defaultSpotRESTBaseURL, spotAccountPath, query, cfg.APISecret)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build spot account request: %w", err)
+	}
+	req.Header.Set("X-MBX-APIKEY", cfg.APIKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send spot account request: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read spot account response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("spot account status %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var payload spotAccountResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode spot account response: %w", err)
+	}
+
+	allowed := allowedSpotAssets(cfg.SpotSymbols)
+
+	balances := make([]spotBalance, 0, len(payload.Balances))
+	for _, item := range payload.Balances {
+		balance, ok, err := parseSpotBalance(item, allowed)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			balances = append(balances, balance)
+		}
+	}
+	sort.Slice(balances, func(i, j int) bool { return balances[i].Asset < balances[j].Asset })
+	return balances, nil
+}
+
+func parseSpotBalance(item spotBalancePayload, allowed map[string]struct{}) (spotBalance, bool, error) {
+	asset := strings.ToUpper(strings.TrimSpace(item.Asset))
+	if _, ok := allowed[asset]; !ok {
+		return spotBalance{}, false, nil
+	}
+	free, err := strconv.ParseFloat(item.Free, 64)
+	if err != nil {
+		return spotBalance{}, false, fmt.Errorf("parse spot free balance for %s: %w", asset, err)
+	}
+	locked, err := strconv.ParseFloat(item.Locked, 64)
+	if err != nil {
+		return spotBalance{}, false, fmt.Errorf("parse spot locked balance for %s: %w", asset, err)
+	}
+	total := free + locked
+	if total <= 0 {
+		return spotBalance{}, false, nil
+	}
+	priceSymbol := spotSymbolToTicker(asset)
+	return spotBalance{Asset: asset, Free: free, Locked: locked, Total: total, PriceSymbol: priceSymbol, QuoteValueText: "-"}, true, nil
 }
 
 var (
@@ -908,6 +1217,216 @@ func consumeUserDataStream(ctx context.Context, client *http.Client, cfg config,
 			}
 		}
 	}
+}
+
+func runSpotUserDataLoop(ctx context.Context, client *http.Client, cfg config, state *appState, notify func()) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		state.setSpotAccountError("connecting spot user data stream...")
+		notify()
+
+		err := consumeSpotUserDataStream(ctx, client, cfg, state, notify)
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+
+		state.setSpotAccountError(fmt.Sprintf("spot user data stream disconnected: %v | retry in %s", err, cfg.RetryDelay))
+		notify()
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(cfg.RetryDelay):
+		}
+	}
+}
+
+func consumeSpotUserDataStream(ctx context.Context, client *http.Client, cfg config, state *appState, notify func()) error {
+	endpoint := defaultSpotWSAPIBaseURL
+	dialer := websocket.Dialer{HandshakeTimeout: cfg.Timeout}
+	conn, _, err := dialer.DialContext(ctx, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("dial spot user data websocket api: %w", err)
+	}
+	defer conn.Close()
+
+	conn.SetReadLimit(1 << 20)
+	_ = conn.SetReadDeadline(time.Now().Add(2 * cfg.Timeout))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(2 * cfg.Timeout))
+	})
+
+	timestamp := time.Now().UnixMilli()
+	recvWindow := int64(cfg.Timeout / time.Millisecond)
+	if recvWindow <= 0 {
+		recvWindow = 5000
+	}
+	signature := signSpotUserDataStreamRequest(cfg.APIKey, cfg.APISecret, timestamp, recvWindow)
+	request := map[string]any{
+		"id":     fmt.Sprintf("spot-user-stream-%d", timestamp),
+		"method": "userDataStream.subscribe.signature",
+		"params": map[string]any{
+			"apiKey":     cfg.APIKey,
+			"timestamp":  timestamp,
+			"recvWindow": recvWindow,
+			"signature":  signature,
+		},
+	}
+	if err := conn.WriteJSON(request); err != nil {
+		return fmt.Errorf("subscribe spot user data stream: %w", err)
+	}
+
+	allowed := allowedSpotAssets(cfg.SpotSymbols)
+	pingTicker := time.NewTicker(cfg.Timeout)
+	defer pingTicker.Stop()
+
+	readErrCh := make(chan error, 1)
+	go func() {
+		defer close(readErrCh)
+		for {
+			_, message, err := conn.ReadMessage()
+			if err != nil {
+				readErrCh <- err
+				return
+			}
+
+			var eventEnvelope struct {
+				SubscriptionID int             `json:"subscriptionId"`
+				Event          json.RawMessage `json:"event"`
+			}
+			if err := json.Unmarshal(message, &eventEnvelope); err == nil && len(eventEnvelope.Event) > 0 {
+				var payload spotUserDataEvent
+				if err := json.Unmarshal(eventEnvelope.Event, &payload); err != nil {
+					readErrCh <- fmt.Errorf("decode spot user event type: %w", err)
+					return
+				}
+
+				switch payload.EventType {
+				case "outboundAccountPosition":
+					updates, err := parseSpotAccountUpdateEvent(eventEnvelope.Event, allowed)
+					if err != nil {
+						readErrCh <- fmt.Errorf("decode spot account update payload: %w", err)
+						return
+					}
+					state.applySpotBalanceUpdates(updates)
+					state.clearSpotAccountError()
+					notify()
+				case "balanceUpdate", "externalLockUpdate":
+					balances, err := fetchSpotBalances(ctx, client, cfg)
+					if err != nil {
+						state.setSpotAccountError(fmt.Sprintf("spot account refresh failed: %v", err))
+					} else {
+						state.setSpotBalances(balances)
+						state.clearSpotAccountError()
+					}
+					notify()
+				case "eventStreamTerminated":
+					readErrCh <- errors.New("spot user data stream terminated")
+					return
+				}
+				continue
+			}
+
+			var response struct {
+				Status int `json:"status"`
+				Error  *struct {
+					Code int    `json:"code"`
+					Msg  string `json:"msg"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(message, &response); err != nil {
+				readErrCh <- fmt.Errorf("decode spot websocket api payload: %w", err)
+				return
+			}
+			if response.Status == 0 {
+				continue
+			}
+			if response.Status != http.StatusOK {
+				if response.Error != nil {
+					readErrCh <- fmt.Errorf("spot subscribe failed: code %d: %s", response.Error.Code, response.Error.Msg)
+				} else {
+					readErrCh <- fmt.Errorf("spot subscribe failed: status %d", response.Status)
+				}
+				return
+			}
+
+			state.clearSpotAccountError()
+			notify()
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutdown"), time.Now().Add(time.Second))
+			return nil
+		case err := <-readErrCh:
+			if err == nil {
+				return nil
+			}
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) || errors.Is(err, netErrClosed) {
+				return err
+			}
+			return err
+		case <-pingTicker.C:
+			if err := conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(time.Second)); err != nil {
+				return fmt.Errorf("ping spot user data websocket api: %w", err)
+			}
+		}
+	}
+}
+
+func signSpotUserDataStreamRequest(apiKey, secret string, timestamp, recvWindow int64) string {
+	payload := fmt.Sprintf("apiKey=%s&recvWindow=%d&timestamp=%d", apiKey, recvWindow, timestamp)
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(payload))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func parseSpotAccountUpdateEvent(event json.RawMessage, allowed map[string]struct{}) ([]spotBalanceUpdate, error) {
+	var payload spotOutboundAccountPositionEvent
+	if err := json.Unmarshal(event, &payload); err != nil {
+		return nil, err
+	}
+
+	updates := make([]spotBalanceUpdate, 0, len(payload.Balances))
+	for _, item := range payload.Balances {
+		update, ok, err := parseSpotBalanceUpdatePayload(item, int64(payload.UpdateTime), allowed)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			updates = append(updates, update)
+		}
+	}
+	return updates, nil
+}
+
+func parseSpotBalanceUpdatePayload(item spotBalanceUpdatePayload, updateTime int64, allowed map[string]struct{}) (spotBalanceUpdate, bool, error) {
+	asset := strings.ToUpper(strings.TrimSpace(item.Asset))
+	if _, ok := allowed[asset]; !ok {
+		return spotBalanceUpdate{}, false, nil
+	}
+
+	free, err := strconv.ParseFloat(string(item.Free), 64)
+	if err != nil {
+		return spotBalanceUpdate{}, false, fmt.Errorf("parse spot free update for %s: %w", asset, err)
+	}
+	locked, err := strconv.ParseFloat(string(item.Locked), 64)
+	if err != nil {
+		return spotBalanceUpdate{}, false, fmt.Errorf("parse spot locked update for %s: %w", asset, err)
+	}
+
+	return spotBalanceUpdate{
+		Asset:      asset,
+		Free:       free,
+		Locked:     locked,
+		UpdateTime: updateTime,
+		Remove:     free+locked <= 0,
+	}, true, nil
 }
 
 func createListenKey(ctx context.Context, client *http.Client, cfg config) (string, error) {
@@ -1206,6 +1725,45 @@ func buildWSURL(baseURL string, symbols []string, chartSymbol string) string {
 	return baseURL + "/stream?streams=" + strings.Join(streams, "/")
 }
 
+func spotSymbolToTicker(asset string) string {
+	asset = strings.ToUpper(strings.TrimSpace(asset))
+	if asset == "" || asset == "USDT" {
+		return ""
+	}
+	return asset + "USDT"
+}
+
+func spotTickerToAsset(symbol string) string {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if strings.HasSuffix(symbol, "USDT") {
+		return strings.TrimSuffix(symbol, "USDT")
+	}
+	return symbol
+}
+
+func spotSymbolsToTickers(assets []string) []string {
+	result := make([]string, 0, len(assets))
+	for _, asset := range assets {
+		ticker := spotSymbolToTicker(asset)
+		if ticker != "" {
+			result = append(result, ticker)
+		}
+	}
+	return normalizeSymbolList(result)
+}
+
+func allowedSpotAssets(symbols []string) map[string]struct{} {
+	allowed := make(map[string]struct{}, len(symbols))
+	for _, asset := range symbols {
+		asset = strings.ToUpper(strings.TrimSpace(asset))
+		if asset == "" {
+			continue
+		}
+		allowed[asset] = struct{}{}
+	}
+	return allowed
+}
+
 func normalizeSymbolList(symbols []string) []string {
 	seen := make(map[string]struct{}, len(symbols))
 	result := make([]string, 0, len(symbols))
@@ -1223,12 +1781,20 @@ func normalizeSymbolList(symbols []string) []string {
 	return result
 }
 
-func newAppState(symbols []string, accountEnabled bool) *appState {
-	rows := make(map[string]rowState, len(symbols))
-	for _, symbol := range symbols {
+func newAppState(cfg config) *appState {
+	rows := make(map[string]rowState, len(cfg.Symbols))
+	for _, symbol := range cfg.Symbols {
 		rows[symbol] = rowState{Symbol: symbol, Status: "waiting"}
 	}
-	return &appState{rows: rows, startedAt: time.Now(), accountEnabled: accountEnabled}
+	spotRows := make(map[string]rowState, len(cfg.SpotSymbols))
+	for _, symbol := range spotSymbolsToTickers(cfg.SpotSymbols) {
+		spotRows[symbol] = rowState{Symbol: symbol, Status: "waiting"}
+	}
+	panel := panelMode(cfg.DefaultPanel)
+	if panel == "" {
+		panel = panelFutures
+	}
+	return &appState{rows: rows, spotRows: spotRows, startedAt: time.Now(), accountEnabled: cfg.hasAccountAuth(), panel: panel}
 }
 
 func (s *appState) setChart(symbol string, candles []klineCandle) {
@@ -1333,6 +1899,24 @@ func calculatePositionPnL(position positionState) float64 {
 	}
 }
 
+func (s *appState) setPanel(panel panelMode) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.panel = panel
+}
+
+func (s *appState) setModal(message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.modalMessage = message
+}
+
+func (s *appState) clearModal() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.modalMessage = ""
+}
+
 func (s *appState) setError(message string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1343,6 +1927,170 @@ func (s *appState) clearError() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastError = ""
+}
+
+func (s *appState) setSpotError(message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.spotError = message
+}
+
+func (s *appState) clearSpotError() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.spotError = ""
+}
+
+func (s *appState) setSpotRows(symbols []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.spotRows = make(map[string]rowState, len(symbols))
+	for _, symbol := range symbols {
+		s.spotRows[symbol] = rowState{Symbol: symbol, Status: "waiting"}
+	}
+}
+
+func (s *appState) applySpotTicker(ticker priceTicker) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.spotRows[ticker.Symbol]
+	current.Symbol = ticker.Symbol
+	current.Price = ticker.Price
+	current.ExchangeTime = ticker.Time
+	current.LocalTime = time.Now()
+	current.Status = "ok"
+	current.Updates++
+	value, err := strconv.ParseFloat(ticker.Price, 64)
+	if err == nil {
+		if current.Updates > 1 || current.PriceValue != 0 {
+			current.PrevValue = current.PriceValue
+			current.HasPrev = true
+		}
+		current.PriceValue = value
+		if current.HasPrev {
+			current.Delta = value - current.PrevValue
+			if current.PrevValue != 0 {
+				current.DeltaPct = current.Delta / current.PrevValue * 100
+			}
+			current.Change = compareFloat(value, current.PrevValue)
+		} else {
+			current.Change = 0
+			current.Delta = 0
+			current.DeltaPct = 0
+		}
+		for i := range s.spotBalances {
+			if s.spotBalances[i].PriceSymbol == ticker.Symbol {
+				s.spotBalances[i].PriceValue = value
+				s.spotBalances[i].QuoteValue = s.spotBalances[i].Total * value
+				s.spotBalances[i].QuoteValueText = formatCompactFloat(s.spotBalances[i].QuoteValue)
+				s.spotBalances[i].LocalUpdate = time.Now()
+			}
+		}
+	}
+	s.spotRows[ticker.Symbol] = current
+	s.spotLastUpdate = time.Now()
+}
+
+func (s *appState) setSpotBalances(balances []spotBalance) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.spotBalances = append([]spotBalance(nil), balances...)
+	for i := range s.spotBalances {
+		if row, ok := s.spotRows[s.spotBalances[i].PriceSymbol]; ok && row.PriceValue > 0 {
+			s.spotBalances[i].PriceValue = row.PriceValue
+			s.spotBalances[i].QuoteValue = s.spotBalances[i].Total * row.PriceValue
+			s.spotBalances[i].QuoteValueText = formatCompactFloat(s.spotBalances[i].QuoteValue)
+		}
+	}
+	s.spotAccountLastUpdate = time.Now()
+}
+
+func (s *appState) applySpotBalanceUpdates(updates []spotBalanceUpdate) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(updates) == 0 {
+		s.spotAccountLastUpdate = time.Now()
+		return
+	}
+
+	indexByAsset := make(map[string]int, len(s.spotBalances))
+	for i, balance := range s.spotBalances {
+		indexByAsset[balance.Asset] = i
+	}
+
+	for _, update := range updates {
+		if update.Asset == "" {
+			continue
+		}
+
+		total := update.Free + update.Locked
+		if idx, ok := indexByAsset[update.Asset]; ok {
+			if update.Remove || total <= 0 {
+				s.spotBalances = append(s.spotBalances[:idx], s.spotBalances[idx+1:]...)
+				indexByAsset = make(map[string]int, len(s.spotBalances))
+				for i, balance := range s.spotBalances {
+					indexByAsset[balance.Asset] = i
+				}
+				continue
+			}
+
+			balance := s.spotBalances[idx]
+			balance.Free = update.Free
+			balance.Locked = update.Locked
+			balance.Total = total
+			balance.LocalUpdate = time.Now()
+			if row, ok := s.spotRows[balance.PriceSymbol]; ok && row.PriceValue > 0 {
+				balance.PriceValue = row.PriceValue
+				balance.QuoteValue = total * row.PriceValue
+				balance.QuoteValueText = formatCompactFloat(balance.QuoteValue)
+			} else {
+				balance.PriceValue = 0
+				balance.QuoteValue = 0
+				balance.QuoteValueText = "-"
+			}
+			s.spotBalances[idx] = balance
+			continue
+		}
+
+		if update.Remove || total <= 0 {
+			continue
+		}
+
+		balance := spotBalance{
+			Asset:          update.Asset,
+			Free:           update.Free,
+			Locked:         update.Locked,
+			Total:          total,
+			PriceSymbol:    spotSymbolToTicker(update.Asset),
+			QuoteValueText: "-",
+			LocalUpdate:    time.Now(),
+		}
+		if row, ok := s.spotRows[balance.PriceSymbol]; ok && row.PriceValue > 0 {
+			balance.PriceValue = row.PriceValue
+			balance.QuoteValue = total * row.PriceValue
+			balance.QuoteValueText = formatCompactFloat(balance.QuoteValue)
+		}
+		s.spotBalances = append(s.spotBalances, balance)
+		indexByAsset[balance.Asset] = len(s.spotBalances) - 1
+	}
+
+	sort.Slice(s.spotBalances, func(i, j int) bool {
+		return s.spotBalances[i].Asset < s.spotBalances[j].Asset
+	})
+	s.spotAccountLastUpdate = time.Now()
+}
+
+func (s *appState) setSpotAccountError(message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.spotAccountError = message
+}
+
+func (s *appState) clearSpotAccountError() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.spotAccountError = ""
 }
 
 func (s *appState) setPositions(positions []positionState) {
@@ -1464,7 +2212,7 @@ func (s *appState) clearAccountError() {
 	s.accountError = ""
 }
 
-func (s *appState) snapshot() ([]rowState, []klineCandle, []positionState, string, string, string, time.Time, time.Time, time.Time, bool) {
+func (s *appState) snapshot() ([]rowState, []rowState, []klineCandle, []positionState, []spotBalance, string, string, string, string, string, time.Time, time.Time, time.Time, time.Time, time.Time, bool, panelMode, string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -1474,9 +2222,16 @@ func (s *appState) snapshot() ([]rowState, []klineCandle, []positionState, strin
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Symbol < rows[j].Symbol })
 
+	spotRows := make([]rowState, 0, len(s.spotRows))
+	for _, row := range s.spotRows {
+		spotRows = append(spotRows, row)
+	}
+	sort.Slice(spotRows, func(i, j int) bool { return spotRows[i].Symbol < spotRows[j].Symbol })
+
 	chart := append([]klineCandle(nil), s.chart...)
 	positions := append([]positionState(nil), s.positions...)
-	return rows, chart, positions, s.chartSymbol, s.lastError, s.accountError, s.startedAt, s.lastUpdate, s.accountLastUpdate, s.accountEnabled
+	spotBalances := append([]spotBalance(nil), s.spotBalances...)
+	return rows, spotRows, chart, positions, spotBalances, s.chartSymbol, s.lastError, s.spotError, s.accountError, s.spotAccountError, s.startedAt, s.lastUpdate, s.spotLastUpdate, s.accountLastUpdate, s.spotAccountLastUpdate, s.accountEnabled, s.panel, s.modalMessage
 }
 
 func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int)) *uiModel {
@@ -1508,11 +2263,12 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 
 	helpRows := [][2]string{
 		{"/ or h", "Open or close help"},
+		{"Tab", "Switch futures / spot panel"},
 		{"Up", "Previous chart symbol"},
 		{"Down", "Next chart symbol"},
 		{"q", "Quit"},
 		{"Ctrl+C", "Quit"},
-		{"Esc", "Close help"},
+		{"Esc", "Close help / modal"},
 	}
 	for i, row := range helpRows {
 		helpTable.SetCell(i+1, 0, tview.NewTableCell(row[0]).SetSelectable(false))
@@ -1523,16 +2279,13 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 	helpTitle := tview.NewTextView().SetDynamicColors(true)
 	helpTitle.SetBackgroundColor(tcell.ColorDefault)
 	helpTitle.SetText("[::b]Shortcuts[-]")
-
 	helpHint := tview.NewTextView().SetDynamicColors(true)
 	helpHint.SetBackgroundColor(tcell.ColorDefault)
 	helpHint.SetText("Esc / Enter / h / / to close")
-
 	helpSpacerTop := tview.NewTextView()
 	helpSpacerTop.SetBackgroundColor(tcell.ColorDefault)
 	helpSpacerBottom := tview.NewTextView()
 	helpSpacerBottom.SetBackgroundColor(tcell.ColorDefault)
-
 	helpContent := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(helpTitle, 1, 0, false).
 		AddItem(helpSpacerTop, 1, 0, false).
@@ -1544,7 +2297,6 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 	helpFrame.SetBorder(true)
 	helpFrame.SetTitle("Help")
 	helpFrame.SetBackgroundColor(tcell.ColorDefault)
-
 	help := tview.NewFlex().
 		AddItem(nil, 0, 1, false).
 		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
@@ -1565,7 +2317,7 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 	positions.SetBorder(true).SetTitle("Positions")
 	chart.SetBorder(true).SetTitle("1H Chart")
 	footer.SetBorder(true)
-	footer.SetText("/ or h help | Up/Down switch chart | q / Ctrl+C quit")
+	footer.SetText("/ or h help | Tab switch panel | Up/Down switch chart | q / Ctrl+C quit")
 
 	ui := &uiModel{app: app, header: header, status: status, table: table, positions: positions, chart: chart, footer: footer, help: help, cfg: cfg, loc: loc, state: state, changeChart: changeChart}
 	ui.refresh()
@@ -1574,10 +2326,30 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 		AddPage("help", help, true, false)
 
 	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, modalMessage := ui.state.snapshot()
+		if modalMessage != "" {
+			switch event.Key() {
+			case tcell.KeyEsc, tcell.KeyEnter:
+				ui.state.clearModal()
+				ui.refreshNow()
+				return nil
+			}
+			switch event.Rune() {
+			case 'q', 'Q', 'h', 'H', '/':
+				ui.state.clearModal()
+				ui.refreshNow()
+				return nil
+			}
+			return nil
+		}
 		if ui.helpOpen {
 			switch event.Key() {
 			case tcell.KeyEsc, tcell.KeyEnter:
 				ui.hideHelp()
+				return nil
+			case tcell.KeyTAB:
+				ui.hideHelp()
+				ui.togglePanel()
 				return nil
 			}
 			switch event.Rune() {
@@ -1602,6 +2374,9 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 				ui.changeChart(1)
 			}
 			return nil
+		case tcell.KeyTAB:
+			ui.togglePanel()
+			return nil
 		}
 		switch event.Rune() {
 		case 'h', 'H', '/':
@@ -1617,19 +2392,41 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 	return ui
 }
 
+func (ui *uiModel) togglePanel() {
+	_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, panel, _ := ui.state.snapshot()
+	switch panel {
+	case panelFutures:
+		if len(ui.cfg.SpotSymbols) == 0 {
+			ui.state.setModal("Spot panel is not configured")
+			ui.refreshNow()
+			return
+		}
+		ui.state.setPanel(panelSpot)
+	case panelSpot:
+		if len(ui.cfg.Symbols) == 0 {
+			ui.state.setModal("Futures panel is not configured")
+			ui.refreshNow()
+			return
+		}
+		ui.state.setPanel(panelFutures)
+	default:
+		if len(ui.cfg.Symbols) > 0 {
+			ui.state.setPanel(panelFutures)
+		} else if len(ui.cfg.SpotSymbols) > 0 {
+			ui.state.setPanel(panelSpot)
+		}
+	}
+	ui.refreshNow()
+}
+
 func (ui *uiModel) layout() tview.Primitive {
 	left := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(ui.table, 0, 4, false).
 		AddItem(ui.positions, 0, 5, false)
-
-	body := tview.NewFlex().SetDirection(tview.FlexColumn).
-		AddItem(left, 0, 3, false).
-		AddItem(ui.chart, 0, 2, false)
-
 	content := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(ui.header, 6, 0, false).
 		AddItem(ui.status, 5, 0, false).
-		AddItem(body, 0, 1, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexColumn).AddItem(left, 0, 3, false).AddItem(ui.chart, 0, 2, false), 0, 1, false).
 		AddItem(ui.footer, 3, 0, false)
 	return content
 }
@@ -1669,36 +2466,70 @@ func (ui *uiModel) requestDraw() {
 	})
 }
 
+func (ui *uiModel) refreshNow() {
+	ui.refresh()
+}
+
 func (ui *uiModel) refresh() {
-	rows, chart, positions, chartSymbol, lastError, accountError, startedAt, lastUpdate, accountLastUpdate, accountEnabled := ui.state.snapshot()
+	rows, spotRows, chart, positions, spotBalances, chartSymbol, lastError, spotError, accountError, spotAccountError, startedAt, lastUpdate, spotLastUpdate, accountLastUpdate, spotAccountLastUpdate, accountEnabled, panel, modalMessage := ui.state.snapshot()
 
 	accountMode := "disabled"
 	if accountEnabled {
 		accountMode = "enabled | stream"
 	}
+	panelName := string(panel)
+	if panelName == "" {
+		panelName = string(panelFutures)
+	}
+	marketStatus := lastError
+	marketUpdate := lastUpdate
+	accountStatusError := accountError
+	accountUpdate := accountLastUpdate
+	if panel == panelSpot {
+		marketStatus = spotError
+		marketUpdate = spotLastUpdate
+		accountStatusError = spotAccountError
+		accountUpdate = spotAccountLastUpdate
+	}
 
 	ui.header.SetText(fmt.Sprintf(
-		"mode: ws\nsymbols: %s\nchart: %s\naccount: %s\nconfig: %s\nnow: %s\nstarted: %s\nmarket update: %s",
+		"panel: %s\nfutures: %s\nspot: %s\nconfig: %s\nnow: %s\nstarted: %s\nmarket update: %s",
+		panelName,
 		strings.Join(ui.cfg.Symbols, ","),
-		chartSymbolOrDefault(chartSymbol, ui.cfg.ChartSymbol),
-		accountMode,
+		strings.Join(ui.cfg.SpotSymbols, ","),
 		ui.cfg.ConfigPath,
 		formatTime(time.Now(), ui.loc, false),
 		formatTime(startedAt, ui.loc, false),
-		formatOptionalTime(lastUpdate, ui.loc),
+		formatOptionalTime(marketUpdate, ui.loc),
 	))
 
-	marketStatus := "[green]ok[-]"
-	if lastError != "" {
-		marketStatus = ui.colorize("red", lastError)
+	statusText := "[green]ok[-]"
+	if marketStatus != "" {
+		statusText = ui.colorize("red", marketStatus)
 	}
-	accountStatus := ui.accountStatusText(accountEnabled, accountError, accountLastUpdate)
-	transport := fmt.Sprintf("retry delay=%s | ws=%s | rest=%s", ui.cfg.RetryDelay, ui.cfg.WSBase, ui.cfg.RESTBase)
-	ui.status.SetText(fmt.Sprintf("market: %s\naccount: %s\n%s", marketStatus, accountStatus, transport))
+	accountStatus := ui.accountStatusText(accountEnabled, accountStatusError, accountUpdate)
+	transport := fmt.Sprintf("retry delay=%s | futures ws=%s | futures rest=%s | spot ws=%s | spot rest=%s", ui.cfg.RetryDelay, ui.cfg.WSBase, ui.cfg.RESTBase, defaultSpotWSBaseURL, defaultSpotRESTBaseURL)
+	ui.status.SetText(fmt.Sprintf("market: %s\naccount: %s\nmode: %s\n%s", statusText, accountStatus, accountMode, transport))
 
-	ui.renderTable(rows)
-	ui.renderPositions(positions, accountEnabled, accountError, accountLastUpdate)
-	ui.renderChart(chart, chartSymbol)
+	if panel == panelSpot {
+		ui.table.SetTitle("Spot")
+		ui.positions.SetTitle("Spot Balances")
+		ui.renderSpotTable(spotRows)
+		ui.renderSpotBalances(spotBalances, spotAccountError)
+		ui.chart.SetTitle("Spot Overview")
+		ui.chart.SetText(buildSpotSummary(spotBalances))
+	} else {
+		ui.table.SetTitle("Contracts")
+		ui.positions.SetTitle("Positions")
+		ui.renderTable(rows)
+		ui.renderPositions(positions, accountEnabled, accountError, accountLastUpdate)
+		ui.renderChart(chart, chartSymbol)
+	}
+
+	if modalMessage != "" {
+		ui.chart.SetTitle("Notice")
+		ui.chart.SetText(modalMessage + "\n\nPress Esc or Enter to close")
+	}
 }
 
 func (ui *uiModel) accountStatusText(accountEnabled bool, accountError string, accountLastUpdate time.Time) string {
@@ -1795,6 +2626,76 @@ func (ui *uiModel) renderPositions(positions []positionState, accountEnabled boo
 	}
 }
 
+func (ui *uiModel) renderSpotTable(rows []rowState) {
+	ui.table.Clear()
+	headers := []string{"SYMBOL", "PRICE", "DELTA", "EXCHANGE_TIME", "LOCAL_UPDATE"}
+	for col, header := range headers {
+		cell := tview.NewTableCell(header).SetSelectable(false).SetAttributes(tcell.AttrBold).SetBackgroundColor(tcell.ColorDefault)
+		if !ui.cfg.NoColor {
+			cell.SetTextColor(tcell.ColorYellow)
+		}
+		ui.table.SetCell(0, col, cell)
+	}
+	for i, row := range rows {
+		price := row.Price
+		if price == "" {
+			price = "-"
+		}
+		ui.table.SetCell(i+1, 0, tview.NewTableCell(row.Symbol).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.table.SetCell(i+1, 1, tview.NewTableCell(ui.colorByChange(row.Change, price)).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.table.SetCell(i+1, 2, tview.NewTableCell(ui.colorByChange(row.Change, formatDelta(row))).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.table.SetCell(i+1, 3, tview.NewTableCell(formatEpoch(row.ExchangeTime, ui.loc)).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.table.SetCell(i+1, 4, tview.NewTableCell(formatOptionalTime(row.LocalTime, ui.loc)).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+	}
+}
+
+func (ui *uiModel) renderSpotBalances(balances []spotBalance, spotAccountError string) {
+	ui.positions.Clear()
+	headers := []string{"ASSET", "FREE", "LOCKED", "TOTAL", "USDT", "PRICE"}
+	for col, header := range headers {
+		cell := tview.NewTableCell(header).SetSelectable(false).SetAttributes(tcell.AttrBold).SetBackgroundColor(tcell.ColorDefault)
+		if !ui.cfg.NoColor {
+			cell.SetTextColor(tcell.ColorYellow)
+		}
+		ui.positions.SetCell(0, col, cell)
+	}
+	if spotAccountError != "" && len(balances) == 0 {
+		ui.positions.SetCell(1, 0, tview.NewTableCell(ui.colorize("red", spotAccountError)).SetSelectable(false).SetExpansion(1).SetBackgroundColor(tcell.ColorDefault))
+		return
+	}
+	if len(balances) == 0 {
+		ui.positions.SetCell(1, 0, tview.NewTableCell("No configured spot balances").SetSelectable(false).SetExpansion(1).SetBackgroundColor(tcell.ColorDefault))
+		return
+	}
+	for i, balance := range balances {
+		ui.positions.SetCell(i+1, 0, tview.NewTableCell(balance.Asset).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.positions.SetCell(i+1, 1, tview.NewTableCell(formatCompactFloat(balance.Free)).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.positions.SetCell(i+1, 2, tview.NewTableCell(formatCompactFloat(balance.Locked)).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.positions.SetCell(i+1, 3, tview.NewTableCell(formatCompactFloat(balance.Total)).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.positions.SetCell(i+1, 4, tview.NewTableCell(balance.QuoteValueText).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.positions.SetCell(i+1, 5, tview.NewTableCell(formatOptionalCompactFloat(balance.PriceValue)).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+	}
+}
+
+func buildSpotSummary(balances []spotBalance) string {
+	if len(balances) == 0 {
+		return "waiting for spot balances..."
+	}
+
+	var total float64
+	for _, balance := range balances {
+		total += balance.QuoteValue
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("assets %d\n", len(balances)))
+	b.WriteString(fmt.Sprintf("total usdt %s\n\n", formatCompactFloat(total)))
+	for _, balance := range balances {
+		b.WriteString(fmt.Sprintf("%-6s total %-12s usdt %-12s\n", balance.Asset, formatCompactFloat(balance.Total), balance.QuoteValueText))
+	}
+	return b.String()
+}
+
 func (ui *uiModel) renderChart(candles []klineCandle, symbol string) {
 	if symbol == "" {
 		symbol = ui.cfg.ChartSymbol
@@ -1844,29 +2745,61 @@ func escapeTView(text string) string {
 }
 
 func printSnapshot(cfg config, loc *time.Location, state *appState) {
-	rows, chart, positions, chartSymbol, lastError, accountError, startedAt, lastUpdate, accountLastUpdate, accountEnabled := state.snapshot()
-	fmt.Printf("mode: ws\nsymbols: %s\nconfig: %s\nstarted: %s\nlast update: %s\n", strings.Join(cfg.Symbols, ","), cfg.ConfigPath, formatTime(startedAt, loc, false), formatOptionalTime(lastUpdate, loc))
+	rows, spotRows, chart, positions, spotBalances, chartSymbol, lastError, spotError, accountError, spotAccountError, startedAt, lastUpdate, spotLastUpdate, accountLastUpdate, spotAccountLastUpdate, accountEnabled, panel, _ := state.snapshot()
+
+	fmt.Printf("mode: ws\npanel: %s\nfutures symbols: %s\nspot symbols: %s\nconfig: %s\nstarted: %s\nfutures update: %s\nspot update: %s\n",
+		panel,
+		strings.Join(cfg.Symbols, ","),
+		strings.Join(cfg.SpotSymbols, ","),
+		cfg.ConfigPath,
+		formatTime(startedAt, loc, false),
+		formatOptionalTime(lastUpdate, loc),
+		formatOptionalTime(spotLastUpdate, loc),
+	)
 	if lastError == "" {
-		fmt.Println("status: ok")
+		fmt.Println("futures status: ok")
 	} else {
-		fmt.Printf("status: %s\n", lastError)
+		fmt.Printf("futures status: %s\n", lastError)
+	}
+	if spotError == "" {
+		fmt.Println("spot status: ok")
+	} else {
+		fmt.Printf("spot status: %s\n", spotError)
 	}
 	if accountEnabled {
 		if accountError == "" {
-			fmt.Printf("account: ok | last sync: %s\n", formatOptionalTime(accountLastUpdate, loc))
+			fmt.Printf("futures account: ok | last sync: %s\n", formatOptionalTime(accountLastUpdate, loc))
 		} else {
-			fmt.Printf("account: %s\n", accountError)
+			fmt.Printf("futures account: %s\n", accountError)
+		}
+		if spotAccountError == "" {
+			fmt.Printf("spot account: ok | last sync: %s\n", formatOptionalTime(spotAccountLastUpdate, loc))
+		} else {
+			fmt.Printf("spot account: %s\n", spotAccountError)
 		}
 	} else {
 		fmt.Println("account: disabled")
 	}
-	fmt.Printf("%-14s %-18s %-18s %-26s %-26s\n", "SYMBOL", "PRICE", "DELTA", "EXCHANGE_TIME", "LOCAL_UPDATE")
-	for _, row := range rows {
-		price := row.Price
-		if price == "" {
-			price = "-"
+	if len(rows) > 0 {
+		fmt.Printf("\n%-14s %-18s %-18s %-26s %-26s\n", "SYMBOL", "PRICE", "DELTA", "EXCHANGE_TIME", "LOCAL_UPDATE")
+		for _, row := range rows {
+			price := row.Price
+			if price == "" {
+				price = "-"
+			}
+			fmt.Printf("%-14s %-18s %-18s %-26s %-26s\n", row.Symbol, price, formatDelta(row), formatEpoch(row.ExchangeTime, loc), formatOptionalTime(row.LocalTime, loc))
 		}
-		fmt.Printf("%-14s %-18s %-18s %-26s %-26s\n", row.Symbol, price, formatDelta(row), formatEpoch(row.ExchangeTime, loc), formatOptionalTime(row.LocalTime, loc))
+	}
+	if len(spotRows) > 0 {
+		fmt.Println("\nSPOT")
+		fmt.Printf("%-14s %-18s %-18s %-26s %-26s\n", "SYMBOL", "PRICE", "DELTA", "EXCHANGE_TIME", "LOCAL_UPDATE")
+		for _, row := range spotRows {
+			price := row.Price
+			if price == "" {
+				price = "-"
+			}
+			fmt.Printf("%-14s %-18s %-18s %-26s %-26s\n", row.Symbol, price, formatDelta(row), formatEpoch(row.ExchangeTime, loc), formatOptionalTime(row.LocalTime, loc))
+		}
 	}
 	if len(positions) > 0 {
 		fmt.Println("\nPOSITIONS")
@@ -1877,6 +2810,13 @@ func printSnapshot(cfg config, loc *time.Location, state *appState) {
 				mode = fmt.Sprintf("%s %sx", mode, position.Leverage)
 			}
 			fmt.Printf("%-12s %-8s %-12s %-12s %-12s %-12s %-12s %-12s\n", position.Symbol, position.Side, formatCompactFloat(position.Size), formatCompactFloat(position.EntryPrice), formatCompactFloat(position.MarkPrice), formatSignedCompactFloat(position.UnrealizedPnL), formatOptionalCompactFloat(position.LiquidationPrice), mode)
+		}
+	}
+	if len(spotBalances) > 0 {
+		fmt.Println("\nSPOT BALANCES")
+		fmt.Printf("%-10s %-14s %-14s %-14s %-14s %-14s\n", "ASSET", "FREE", "LOCKED", "TOTAL", "USDT", "PRICE")
+		for _, balance := range spotBalances {
+			fmt.Printf("%-10s %-14s %-14s %-14s %-14s %-14s\n", balance.Asset, formatCompactFloat(balance.Free), formatCompactFloat(balance.Locked), formatCompactFloat(balance.Total), balance.QuoteValueText, formatOptionalCompactFloat(balance.PriceValue))
 		}
 	}
 	if len(chart) > 0 {
