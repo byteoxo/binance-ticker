@@ -39,6 +39,12 @@ brew tap byteoxo/tap
 brew install binance-ticker
 ```
 
+After installation, both `bt` and `binance-ticker` are available:
+
+```bash
+bt
+```
+
 ### Pre-built binaries
 
 Download the latest release for your platform from the [Releases](https://github.com/byteoxo/binance-ticker/releases) page.
