@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Collect commits since last tag
+        id: commits
+        run: |
+          # Find the previous tag; fall back to the first commit if this is the first release
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null \
+            || git rev-list --max-parents=0 HEAD)
+          echo "prev_tag=$PREV_TAG" >> $GITHUB_OUTPUT
+
+          git log "${PREV_TAG}..HEAD" \
+            --pretty=format:"- %s (%h)" \
+            --no-merges \
+            > /tmp/commits.txt
+
+          echo "=== Commits to summarise ==="
+          cat /tmp/commits.txt
+
+      - name: Generate release notes via OpenRouter
+        id: notes
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          COMMITS="$(cat /tmp/commits.txt)"
+
+          # Build request JSON safely with jq
+          PAYLOAD=$(jq -n \
+            --arg tag "$TAG" \
+            --arg commits "$COMMITS" \
+            '{
+              model: "anthropic/claude-3.5-haiku",
+              messages: [{
+                role: "user",
+                content: (
+                  "You are writing GitHub release notes for **binance-ticker** — a terminal-based Binance futures/spot price ticker written in Go.\n\n"
+                  + "Version: " + $tag + "\n\n"
+                  + "Raw commits since last release:\n" + $commits + "\n\n"
+                  + "Instructions:\n"
+                  + "- Write a concise, user-friendly release body in Markdown.\n"
+                  + "- Group changes logically: ### What'\''s New / ### Bug Fixes / ### Improvements / ### Internal — only include sections that apply.\n"
+                  + "- Rewrite technical commit messages into plain language a user would understand.\n"
+                  + "- Skip trivial or internal-only changes (refactors, typos, chores) unless they are significant.\n"
+                  + "- Do NOT include a title or version header — start directly with the first section.\n"
+                  + "- Keep the total length under 300 words."
+                )
+              }]
+            }')
+
+          RESPONSE=$(curl -sf \
+            -X POST https://openrouter.ai/api/v1/chat/completions \
+            -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD") || true
+
+          NOTES=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
+
+          if [ -z "$NOTES" ]; then
+            echo "⚠️  OpenRouter call failed or returned empty — falling back to raw commits"
+            NOTES="$(cat /tmp/commits.txt)"
+          fi
+
+          echo "=== Release notes ==="
+          echo "$NOTES"
+          echo "$NOTES" > /tmp/release_notes.md
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --clean --release-notes /tmp/release_notes.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
