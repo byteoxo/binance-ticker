@@ -34,7 +34,8 @@ const (
 	defaultRESTBaseURL        = "https://fapi.binance.com"
 	defaultSpotWSBaseURL      = "wss://stream.binance.com:9443"
 	defaultSpotRESTBaseURL    = "https://api.binance.com"
-	klinePath                 = "/fapi/v1/klines"
+	futuresKlinePath          = "/fapi/v1/klines"
+	spotKlinePath             = "/api/v3/klines"
 	positionRiskPath          = "/fapi/v3/positionRisk"
 	listenKeyPath             = "/fapi/v1/listenKey"
 	spotAccountPath           = "/api/v3/account"
@@ -334,10 +335,12 @@ type appState struct {
 	mu                    sync.RWMutex
 	rows                  map[string]rowState
 	spotRows              map[string]rowState
-	chart                 []klineCandle
+	futuresChart          []klineCandle
+	spotChart             []klineCandle
 	positions             []positionState
 	spotBalances          []spotBalance
-	chartSymbol           string
+	futuresChartSymbol    string
+	spotChartSymbol       string
 	panel                 panelMode
 	modalMessage          string
 	startedAt             time.Time
@@ -506,6 +509,24 @@ func resolveConfigPath() (string, error) {
 	return "", fmt.Errorf("config file not found; expected one of %s or %s", candidates[0], candidates[1])
 }
 
+func isSpotTickerSymbolFunc(cfg config) func(string) bool {
+	spotSet := make(map[string]struct{}, len(cfg.SpotSymbols))
+	for _, symbol := range spotSymbolsToTickers(cfg.SpotSymbols) {
+		spotSet[symbol] = struct{}{}
+	}
+	return func(symbol string) bool {
+		_, ok := spotSet[strings.ToUpper(strings.TrimSpace(symbol))]
+		return ok
+	}
+}
+
+func getChartSymbolForActivePanel(state *appState) func() string {
+	return func() string {
+		_, _, _, _, _, chartSymbol, _, _, _, _, _, _, _, _, _, _, _, _ := state.snapshot()
+		return chartSymbol
+	}
+}
+
 func run(ctx context.Context, client *http.Client, cfg config, loc *time.Location, state *appState) error {
 	if len(cfg.Symbols) > 0 {
 		if err := loadChartHistory(ctx, client, cfg, state); err != nil {
@@ -522,19 +543,28 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 		if err := loadInitialSpotBalances(ctx, client, cfg, state); err != nil {
 			state.setSpotAccountError(fmt.Sprintf("spot balances init failed: %v", err))
 		}
+		if len(cfg.SpotSymbols) > 0 {
+			spotTickers := spotSymbolsToTickers(cfg.SpotSymbols)
+			if len(spotTickers) > 0 && (cfg.DefaultPanel == string(panelSpot) || len(cfg.Symbols) == 0) {
+				if err := loadChartHistoryForSymbol(ctx, client, defaultSpotRESTBaseURL, panelSpot, spotTickers[0], cfg.ChartLimit, state); err != nil {
+					state.setSpotError(fmt.Sprintf("spot chart init failed: %v", err))
+				}
+			}
+		}
 	}
 
-	var chartMu sync.RWMutex
-	chartSymbol := cfg.ChartSymbol
-	setChartSymbol := func(symbol string) {
-		chartMu.Lock()
-		chartSymbol = symbol
-		chartMu.Unlock()
-	}
 	getChartSymbol := func() string {
-		chartMu.RLock()
-		defer chartMu.RUnlock()
+		_, _, _, _, _, chartSymbol, _, _, _, _, _, _, _, _, _, _, _, _ := state.snapshot()
 		return chartSymbol
+	}
+	setChartSymbol := func(panel panelMode, symbol string) {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		if panel == panelSpot {
+			state.spotChartSymbol = symbol
+		} else {
+			state.futuresChartSymbol = symbol
+		}
 	}
 	getTickerSymbols := func() []string {
 		_, _, _, positions, _, _, _, _, _, _, _, _, _, _, _, _, _, _ := state.snapshot()
@@ -550,27 +580,54 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 	}
 
 	changeChart := func(offset int) {
-		if len(cfg.Symbols) == 0 {
-			state.setModal("Futures is not configured")
+		_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, panel, _ := state.snapshot()
+
+		var symbols []string
+		var baseURL string
+		var waitingMessage string
+		var switchMessage string
+		var clearErr func()
+		var setErr func(string)
+
+		switch panel {
+		case panelSpot:
+			symbols = spotSymbolsToTickers(cfg.SpotSymbols)
+			baseURL = defaultSpotRESTBaseURL
+			waitingMessage = "Spot panel is not configured"
+			switchMessage = "switching spot chart to %s..."
+			clearErr = state.clearSpotError
+			setErr = state.setSpotError
+		default:
+			symbols = cfg.Symbols
+			baseURL = cfg.RESTBase
+			waitingMessage = "Futures is not configured"
+			switchMessage = "switching chart to %s..."
+			clearErr = state.clearError
+			setErr = state.setError
+		}
+
+		if len(symbols) == 0 {
+			state.setModal(waitingMessage)
 			return
 		}
+
 		current := getChartSymbol()
-		idx := indexOfSymbol(cfg.Symbols, current)
+		idx := indexOfSymbol(symbols, current)
 		if idx < 0 {
 			idx = 0
 		}
-		next := cfg.Symbols[(idx+offset+len(cfg.Symbols))%len(cfg.Symbols)]
+		next := symbols[(idx+offset+len(symbols))%len(symbols)]
 		if next == current {
 			return
 		}
 
-		setChartSymbol(next)
-		state.setError(fmt.Sprintf("switching chart to %s...", next))
-		if err := loadChartHistoryForSymbol(ctx, client, cfg.RESTBase, next, cfg.ChartLimit, state); err != nil {
-			state.setError(fmt.Sprintf("chart switch failed: %v", err))
+		setChartSymbol(panel, next)
+		setErr(fmt.Sprintf(switchMessage, next))
+		if err := loadChartHistoryForSymbol(ctx, client, baseURL, panel, next, cfg.ChartLimit, state); err != nil {
+			setErr(fmt.Sprintf("chart switch failed: %v", err))
 			return
 		}
-		state.clearError()
+		clearErr()
 	}
 
 	ui := newUI(cfg, loc, state, changeChart)
@@ -583,17 +640,15 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 		})
 	}()
 
-	if len(cfg.Symbols) > 0 {
-		go func() {
-			err := runWSLoop(ctx, cfg, state, ui.requestDraw, getChartSymbol, getTickerSymbols)
-			if err != nil {
-				select {
-				case errCh <- err:
-				default:
-				}
+	go func() {
+		err := runWSLoop(ctx, cfg, state, ui.requestDraw, getChartSymbol, getTickerSymbols, isSpotTickerSymbolFunc(cfg))
+		if err != nil {
+			select {
+			case errCh <- err:
+			default:
 			}
-		}()
-	}
+		}
+	}()
 
 	if cfg.hasAccountAuth() && len(cfg.Symbols) > 0 {
 		go runUserDataLoop(ctx, client, cfg, state, ui.requestDraw)
@@ -627,7 +682,7 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 	}
 }
 
-func runWSLoop(ctx context.Context, cfg config, state *appState, notify func(), getChartSymbol func() string, getTickerSymbols func() []string) error {
+func runWSLoop(ctx context.Context, cfg config, state *appState, notify func(), getChartSymbol func() string, getTickerSymbols func() []string, isSpotChartSymbol func(string) bool) error {
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -636,7 +691,7 @@ func runWSLoop(ctx context.Context, cfg config, state *appState, notify func(), 
 		state.setError("connecting websocket...")
 		notify()
 
-		err := consumeWS(ctx, cfg, state, notify, getChartSymbol, getTickerSymbols)
+		err := consumeWS(ctx, cfg, state, notify, getChartSymbol, getTickerSymbols, isSpotChartSymbol)
 		if err == nil || ctx.Err() != nil {
 			return nil
 		}
@@ -655,8 +710,12 @@ func runWSLoop(ctx context.Context, cfg config, state *appState, notify func(), 
 	}
 }
 
-func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), getChartSymbol func() string, getTickerSymbols func() []string) error {
-	endpoint := buildWSURL(cfg.WSBase, getTickerSymbols(), getChartSymbol())
+func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), getChartSymbol func() string, getTickerSymbols func() []string, isSpotChartSymbol func(string) bool) error {
+	chartSymbol := getChartSymbol()
+	if isSpotChartSymbol(chartSymbol) {
+		chartSymbol = ""
+	}
+	endpoint := buildWSURL(cfg.WSBase, getTickerSymbols(), chartSymbol)
 	dialer := websocket.Dialer{HandshakeTimeout: cfg.Timeout}
 	conn, _, err := dialer.DialContext(ctx, endpoint, nil)
 	if err != nil {
@@ -677,7 +736,7 @@ func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), 
 	defer pingTicker.Stop()
 	resubscribeTicker := time.NewTicker(time.Second)
 	defer resubscribeTicker.Stop()
-	baselineSymbols := strings.Join(getTickerSymbols(), ",")
+	baselineSymbols := strings.Join(getTickerSymbols(), ",") + "|" + chartSymbol
 
 	readErrCh := make(chan error, 1)
 	go func() {
@@ -705,7 +764,7 @@ func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), 
 					return
 				}
 				if candle.Symbol == getChartSymbol() {
-					state.applyChartCandle(candle, cfg.ChartLimit)
+					state.applyChartCandle(panelFutures, candle, cfg.ChartLimit)
 				}
 				notify()
 			}
@@ -730,7 +789,11 @@ func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), 
 				return fmt.Errorf("ping websocket: %w", err)
 			}
 		case <-resubscribeTicker.C:
-			currentSymbols := strings.Join(getTickerSymbols(), ",")
+			currentChartSymbol := getChartSymbol()
+			if isSpotChartSymbol(currentChartSymbol) {
+				currentChartSymbol = ""
+			}
+			currentSymbols := strings.Join(getTickerSymbols(), ",") + "|" + currentChartSymbol
 			if currentSymbols != baselineSymbols {
 				state.setError("updating market subscriptions...")
 				notify()
@@ -749,7 +812,7 @@ func runSpotWSLoop(ctx context.Context, cfg config, state *appState, notify func
 		state.setSpotError("connecting spot websocket...")
 		notify()
 
-		err := consumeSpotWS(ctx, cfg, state, notify, getSpotTickerSymbols)
+		err := consumeSpotWS(ctx, cfg, state, notify, getSpotTickerSymbols, getChartSymbolForActivePanel(state), isSpotTickerSymbolFunc(cfg))
 		if err == nil || ctx.Err() != nil {
 			return nil
 		}
@@ -768,8 +831,12 @@ func runSpotWSLoop(ctx context.Context, cfg config, state *appState, notify func
 	}
 }
 
-func consumeSpotWS(ctx context.Context, cfg config, state *appState, notify func(), getSpotTickerSymbols func() []string) error {
-	endpoint := buildWSURL(defaultSpotWSBaseURL, getSpotTickerSymbols(), "")
+func consumeSpotWS(ctx context.Context, cfg config, state *appState, notify func(), getSpotTickerSymbols func() []string, getChartSymbol func() string, isSpotChartSymbol func(string) bool) error {
+	chartSymbol := getChartSymbol()
+	if !isSpotChartSymbol(chartSymbol) {
+		chartSymbol = ""
+	}
+	endpoint := buildWSURL(defaultSpotWSBaseURL, getSpotTickerSymbols(), chartSymbol)
 	dialer := websocket.Dialer{HandshakeTimeout: cfg.Timeout}
 	conn, _, err := dialer.DialContext(ctx, endpoint, nil)
 	if err != nil {
@@ -790,7 +857,7 @@ func consumeSpotWS(ctx context.Context, cfg config, state *appState, notify func
 	defer pingTicker.Stop()
 	resubscribeTicker := time.NewTicker(time.Second)
 	defer resubscribeTicker.Stop()
-	baselineSymbols := strings.Join(getSpotTickerSymbols(), ",")
+	baselineSymbols := strings.Join(getSpotTickerSymbols(), ",") + "|" + chartSymbol
 
 	readErrCh := make(chan error, 1)
 	go func() {
@@ -801,13 +868,24 @@ func consumeSpotWS(ctx context.Context, cfg config, state *appState, notify func
 				readErrCh <- err
 				return
 			}
-			if strings.HasSuffix(envelope.Stream, "@ticker") {
+			switch {
+			case strings.HasSuffix(envelope.Stream, "@ticker"):
 				ticker, err := parseWSTicker(envelope.Data)
 				if err != nil {
 					readErrCh <- fmt.Errorf("decode spot websocket ticker payload: %w", err)
 					return
 				}
 				state.applySpotTicker(ticker)
+				notify()
+			case strings.HasSuffix(envelope.Stream, "@kline_1h"):
+				candle, err := parseWSKline(envelope.Data)
+				if err != nil {
+					readErrCh <- fmt.Errorf("decode spot websocket kline payload: %w", err)
+					return
+				}
+				if candle.Symbol == getChartSymbol() {
+					state.applyChartCandle(panelSpot, candle, cfg.ChartLimit)
+				}
 				notify()
 			}
 		}
@@ -831,7 +909,11 @@ func consumeSpotWS(ctx context.Context, cfg config, state *appState, notify func
 				return fmt.Errorf("ping spot websocket: %w", err)
 			}
 		case <-resubscribeTicker.C:
-			currentSymbols := strings.Join(getSpotTickerSymbols(), ",")
+			currentChartSymbol := getChartSymbol()
+			if !isSpotChartSymbol(currentChartSymbol) {
+				currentChartSymbol = ""
+			}
+			currentSymbols := strings.Join(getSpotTickerSymbols(), ",") + "|" + currentChartSymbol
 			if currentSymbols != baselineSymbols {
 				state.setSpotError("updating spot subscriptions...")
 				notify()
@@ -983,7 +1065,7 @@ func parseWSKline(data []byte) (klineCandle, error) {
 }
 
 func loadChartHistory(ctx context.Context, client *http.Client, cfg config, state *appState) error {
-	return loadChartHistoryForSymbol(ctx, client, cfg.RESTBase, cfg.ChartSymbol, cfg.ChartLimit, state)
+	return loadChartHistoryForSymbol(ctx, client, cfg.RESTBase, panelFutures, cfg.ChartSymbol, cfg.ChartLimit, state)
 }
 
 func loadInitialPositions(ctx context.Context, client *http.Client, cfg config, state *appState) error {
@@ -1563,12 +1645,12 @@ func parsePositionUpdatePayload(item userDataPositionPayload, updateTime int64) 
 	}, nil
 }
 
-func loadChartHistoryForSymbol(ctx context.Context, client *http.Client, baseURL, symbol string, limit int, state *appState) error {
+func loadChartHistoryForSymbol(ctx context.Context, client *http.Client, baseURL string, panel panelMode, symbol string, limit int, state *appState) error {
 	klines, err := fetchKlines(ctx, client, baseURL, symbol, limit)
 	if err != nil {
 		return err
 	}
-	state.setChart(symbol, klines)
+	state.setChart(panel, symbol, klines)
 	return nil
 }
 
@@ -1615,7 +1697,10 @@ func buildKlineURL(baseURL, symbol string, limit int) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parse base url: %w", err)
 	}
-	parsed.Path = klinePath
+	parsed.Path = futuresKlinePath
+	if strings.EqualFold(parsed.Hostname(), "api.binance.com") {
+		parsed.Path = spotKlinePath
+	}
 
 	query := url.Values{}
 	query.Set("symbol", symbol)
@@ -1715,8 +1800,9 @@ func interfaceToString(value interface{}) (string, error) {
 }
 
 func buildWSURL(baseURL string, symbols []string, chartSymbol string) string {
+	symbols = normalizeSymbolList(symbols)
 	streams := make([]string, 0, len(symbols)+1)
-	for _, symbol := range normalizeSymbolList(symbols) {
+	for _, symbol := range symbols {
 		streams = append(streams, strings.ToLower(symbol)+"@ticker")
 	}
 	if chartSymbol != "" {
@@ -1787,40 +1873,79 @@ func newAppState(cfg config) *appState {
 		rows[symbol] = rowState{Symbol: symbol, Status: "waiting"}
 	}
 	spotRows := make(map[string]rowState, len(cfg.SpotSymbols))
-	for _, symbol := range spotSymbolsToTickers(cfg.SpotSymbols) {
+	spotTickers := spotSymbolsToTickers(cfg.SpotSymbols)
+	for _, symbol := range spotTickers {
 		spotRows[symbol] = rowState{Symbol: symbol, Status: "waiting"}
 	}
 	panel := panelMode(cfg.DefaultPanel)
 	if panel == "" {
 		panel = panelFutures
 	}
-	return &appState{rows: rows, spotRows: spotRows, startedAt: time.Now(), accountEnabled: cfg.hasAccountAuth(), panel: panel}
+
+	futuresChartSymbol := ""
+	if len(cfg.Symbols) > 0 {
+		futuresChartSymbol = cfg.ChartSymbol
+		if futuresChartSymbol == "" {
+			futuresChartSymbol = cfg.Symbols[0]
+		}
+	}
+	spotChartSymbol := ""
+	if len(spotTickers) > 0 {
+		spotChartSymbol = spotTickers[0]
+	}
+
+	return &appState{
+		rows:               rows,
+		spotRows:           spotRows,
+		startedAt:          time.Now(),
+		accountEnabled:     cfg.hasAccountAuth(),
+		panel:              panel,
+		futuresChartSymbol: futuresChartSymbol,
+		spotChartSymbol:    spotChartSymbol,
+	}
 }
 
-func (s *appState) setChart(symbol string, candles []klineCandle) {
+func (s *appState) setChart(panel panelMode, symbol string, candles []klineCandle) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.chartSymbol = symbol
-	s.chart = append([]klineCandle(nil), candles...)
+	if panel == panelSpot {
+		s.spotChartSymbol = symbol
+		s.spotChart = append([]klineCandle(nil), candles...)
+	} else {
+		s.futuresChartSymbol = symbol
+		s.futuresChart = append([]klineCandle(nil), candles...)
+	}
 	if !s.lastUpdate.IsZero() {
 		return
 	}
 	s.lastUpdate = time.Now()
 }
 
-func (s *appState) applyChartCandle(candle klineCandle, limit int) {
+func (s *appState) applyChartCandle(panel panelMode, candle klineCandle, limit int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if limit <= 0 {
 		limit = defaultChartLimit
 	}
-	if len(s.chart) > 0 && s.chart[len(s.chart)-1].OpenTime == candle.OpenTime {
-		s.chart[len(s.chart)-1] = candle
+
+	chart := s.futuresChart
+	if panel == panelSpot {
+		chart = s.spotChart
+	}
+
+	if len(chart) > 0 && chart[len(chart)-1].OpenTime == candle.OpenTime {
+		chart[len(chart)-1] = candle
 	} else {
-		s.chart = append(s.chart, candle)
-		if len(s.chart) > limit {
-			s.chart = append([]klineCandle(nil), s.chart[len(s.chart)-limit:]...)
+		chart = append(chart, candle)
+		if len(chart) > limit {
+			chart = append([]klineCandle(nil), chart[len(chart)-limit:]...)
 		}
+	}
+
+	if panel == panelSpot {
+		s.spotChart = chart
+	} else {
+		s.futuresChart = chart
 	}
 	s.lastUpdate = time.Now()
 }
@@ -1842,7 +1967,13 @@ func (s *appState) applyTicker(ticker priceTicker) {
 }
 
 func (s *appState) applyTickerLocked(ticker priceTicker) {
-	current := s.rows[ticker.Symbol]
+	current, tracked := s.rows[ticker.Symbol]
+	if !tracked {
+		if value, err := strconv.ParseFloat(ticker.Price, 64); err == nil {
+			s.refreshPositionMarketValueLocked(ticker.Symbol, value)
+		}
+		return
+	}
 	current.Symbol = ticker.Symbol
 	current.Price = ticker.Price
 	current.ExchangeTime = ticker.Time
@@ -1953,7 +2084,10 @@ func (s *appState) setSpotRows(symbols []string) {
 func (s *appState) applySpotTicker(ticker priceTicker) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	current := s.spotRows[ticker.Symbol]
+	current, tracked := s.spotRows[ticker.Symbol]
+	if !tracked {
+		return
+	}
 	current.Symbol = ticker.Symbol
 	current.Price = ticker.Price
 	current.ExchangeTime = ticker.Time
@@ -2228,10 +2362,15 @@ func (s *appState) snapshot() ([]rowState, []rowState, []klineCandle, []position
 	}
 	sort.Slice(spotRows, func(i, j int) bool { return spotRows[i].Symbol < spotRows[j].Symbol })
 
-	chart := append([]klineCandle(nil), s.chart...)
+	chart := append([]klineCandle(nil), s.futuresChart...)
 	positions := append([]positionState(nil), s.positions...)
 	spotBalances := append([]spotBalance(nil), s.spotBalances...)
-	return rows, spotRows, chart, positions, spotBalances, s.chartSymbol, s.lastError, s.spotError, s.accountError, s.spotAccountError, s.startedAt, s.lastUpdate, s.spotLastUpdate, s.accountLastUpdate, s.spotAccountLastUpdate, s.accountEnabled, s.panel, s.modalMessage
+	chartSymbol := s.futuresChartSymbol
+	if s.panel == panelSpot {
+		chart = append([]klineCandle(nil), s.spotChart...)
+		chartSymbol = s.spotChartSymbol
+	}
+	return rows, spotRows, chart, positions, spotBalances, chartSymbol, s.lastError, s.spotError, s.accountError, s.spotAccountError, s.startedAt, s.lastUpdate, s.spotLastUpdate, s.accountLastUpdate, s.spotAccountLastUpdate, s.accountEnabled, s.panel, s.modalMessage
 }
 
 func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int)) *uiModel {
@@ -2264,8 +2403,8 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 	helpRows := [][2]string{
 		{"/ or h", "Open or close help"},
 		{"Tab", "Switch futures / spot panel"},
-		{"Up", "Previous chart symbol"},
-		{"Down", "Next chart symbol"},
+		{"Up / Left", "Previous chart symbol"},
+		{"Down / Right", "Next chart symbol"},
 		{"q", "Quit"},
 		{"Ctrl+C", "Quit"},
 		{"Esc", "Close help / modal"},
@@ -2317,7 +2456,7 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 	positions.SetBorder(true).SetTitle("Positions")
 	chart.SetBorder(true).SetTitle("1H Chart")
 	footer.SetBorder(true)
-	footer.SetText("/ or h help | Tab switch panel | Up/Down switch chart | q / Ctrl+C quit")
+	footer.SetText("/ or h help | Tab switch panel | Arrows switch chart | q / Ctrl+C quit")
 
 	ui := &uiModel{app: app, header: header, status: status, table: table, positions: positions, chart: chart, footer: footer, help: help, cfg: cfg, loc: loc, state: state, changeChart: changeChart}
 	ui.refresh()
@@ -2364,12 +2503,12 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 		case tcell.KeyCtrlC:
 			app.Stop()
 			return nil
-		case tcell.KeyUp:
+		case tcell.KeyUp, tcell.KeyLeft:
 			if ui.changeChart != nil {
 				ui.changeChart(-1)
 			}
 			return nil
-		case tcell.KeyDown:
+		case tcell.KeyDown, tcell.KeyRight:
 			if ui.changeChart != nil {
 				ui.changeChart(1)
 			}
@@ -2392,6 +2531,15 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 	return ui
 }
 
+func getChartSymbolForPanel(state *appState, panel panelMode) string {
+	state.mu.RLock()
+	defer state.mu.RUnlock()
+	if panel == panelSpot {
+		return state.spotChartSymbol
+	}
+	return state.futuresChartSymbol
+}
+
 func (ui *uiModel) togglePanel() {
 	_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, panel, _ := ui.state.snapshot()
 	switch panel {
@@ -2402,6 +2550,9 @@ func (ui *uiModel) togglePanel() {
 			return
 		}
 		ui.state.setPanel(panelSpot)
+		if chartSymbol := getChartSymbolForPanel(ui.state, panelSpot); chartSymbol != "" {
+			_ = loadChartHistoryForSymbol(context.Background(), &http.Client{Timeout: ui.cfg.Timeout}, defaultSpotRESTBaseURL, panelSpot, chartSymbol, ui.cfg.ChartLimit, ui.state)
+		}
 	case panelSpot:
 		if len(ui.cfg.Symbols) == 0 {
 			ui.state.setModal("Futures panel is not configured")
@@ -2409,6 +2560,9 @@ func (ui *uiModel) togglePanel() {
 			return
 		}
 		ui.state.setPanel(panelFutures)
+		if chartSymbol := getChartSymbolForPanel(ui.state, panelFutures); chartSymbol != "" {
+			_ = loadChartHistoryForSymbol(context.Background(), &http.Client{Timeout: ui.cfg.Timeout}, ui.cfg.RESTBase, panelFutures, chartSymbol, ui.cfg.ChartLimit, ui.state)
+		}
 	default:
 		if len(ui.cfg.Symbols) > 0 {
 			ui.state.setPanel(panelFutures)
@@ -2516,8 +2670,7 @@ func (ui *uiModel) refresh() {
 		ui.positions.SetTitle("Spot Balances")
 		ui.renderSpotTable(spotRows)
 		ui.renderSpotBalances(spotBalances, spotAccountError)
-		ui.chart.SetTitle("Spot Overview")
-		ui.chart.SetText(buildSpotSummary(spotBalances))
+		ui.renderChart(chart, chartSymbol)
 	} else {
 		ui.table.SetTitle("Contracts")
 		ui.positions.SetTitle("Positions")
