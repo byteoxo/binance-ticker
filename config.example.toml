@@ -1,6 +1,8 @@
 symbols = ["ETHUSDT", "BTCUSDT", "SOLUSDT"]
+spot_symbols = ["ZKC", "BARD"]
 chart_symbol = "ETHUSDT"
 chart_limit = 8
+default_panel = "futures"
 timeout = "8s"
 tz = "Asia/Shanghai"
 rest_base = "https://fapi.binance.com"
