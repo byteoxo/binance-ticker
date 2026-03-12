@@ -102,3 +102,71 @@ jobs:
           gh release edit "$TAG" \
             --repo "${{ github.repository }}" \
             --notes "$NOTES"
+
+      - name: Update Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"   # strip leading 'v'
+
+          # Download checksums from the just-published release
+          CHECKSUMS=$(curl -sL \
+            "https://github.com/${{ github.repository }}/releases/download/${TAG}/checksums.txt")
+
+          SHA_DARWIN_ARM64=$(echo "$CHECKSUMS" | awk '/darwin_arm64\.tar\.gz/ {print $1}')
+          SHA_DARWIN_AMD64=$(echo "$CHECKSUMS" | awk '/darwin_amd64\.tar\.gz/ {print $1}')
+          SHA_LINUX_ARM64=$(echo "$CHECKSUMS"  | awk '/linux_arm64\.tar\.gz/  {print $1}')
+          SHA_LINUX_AMD64=$(echo "$CHECKSUMS"  | awk '/linux_amd64\.tar\.gz/  {print $1}')
+
+          BASE_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}"
+
+          # Render new formula content
+          cat > "$RUNNER_TEMP/binance-ticker.rb" << FORMULA
+          class BinanceTicker < Formula
+            desc "Terminal-based Binance futures/spot price ticker with real-time WebSocket updates"
+            homepage "https://github.com/${{ github.repository }}"
+            license "MIT"
+            version "${VERSION}"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "${BASE_URL}/binance-ticker_darwin_arm64.tar.gz"
+                sha256 "${SHA_DARWIN_ARM64}"
+              else
+                url "${BASE_URL}/binance-ticker_darwin_amd64.tar.gz"
+                sha256 "${SHA_DARWIN_AMD64}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "${BASE_URL}/binance-ticker_linux_arm64.tar.gz"
+                sha256 "${SHA_LINUX_ARM64}"
+              else
+                url "${BASE_URL}/binance-ticker_linux_amd64.tar.gz"
+                sha256 "${SHA_LINUX_AMD64}"
+              end
+            end
+
+            def install
+              bin.install "binance-ticker"
+            end
+
+            test do
+              assert_match "Usage", shell_output("#{bin}/binance-ticker --help 2>&1", 1)
+            end
+          end
+          FORMULA
+
+          # Get current file SHA (required by GitHub API to update a file)
+          FILE_SHA=$(gh api repos/byteoxo/homebrew-tap/contents/Formula/binance-ticker.rb \
+            --jq '.sha')
+
+          # Push updated formula to tap repo
+          gh api repos/byteoxo/homebrew-tap/contents/Formula/binance-ticker.rb \
+            --method PUT \
+            --field message="Update binance-ticker to ${TAG}" \
+            --field content="$(base64 -w0 < "$RUNNER_TEMP/binance-ticker.rb")" \
+            --field sha="$FILE_SHA" \
+            --jq '.content.html_url'
