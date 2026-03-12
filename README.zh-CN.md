@@ -1,14 +1,14 @@
-# BFT
+# Binance Ticker
 
 [English README](./README.md)
 
-`bft` 是一个使用 Go 编写的币安终端查看工具，支持合约与现货实时行情监控以及 1 小时 K 线图展示，界面基于 `tview/tcell`。
+`binance-ticker` 是一个使用 Go 编写的币安终端查看工具，支持合约与现货实时行情监控以及 1 小时 K 线图展示，界面基于 `tview/tcell`。
 
 ## 预览
 
-<img src="./assets/screenhot.png" alt="BFT 截图" width="760">
+<img src="./assets/screenhot.png" alt="Binance Ticker 截图" width="760">
 
-<img src="./assets/example.gif" alt="BFT 演示" width="760">
+<img src="./assets/example.gif" alt="Binance Ticker 演示" width="760">
 
 ## 功能
 
@@ -42,8 +42,8 @@ go run .
 编译为二进制：
 
 ```bash
-go build -o bft .
-./bft
+go build -o binance-ticker .
+./binance-ticker
 ```
 
 ## 配置字段
