@@ -76,15 +76,23 @@ func consumeUserDataStream(ctx context.Context, client *http.Client, cfg config,
 	go func() {
 		defer close(readErrCh)
 		for {
-			var payload userDataEvent
-			if err := conn.ReadJSON(&payload); err != nil {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
 				readErrCh <- err
 				return
 			}
 
-			switch payload.EventType {
+			var envelope struct {
+				EventType string `json:"e"`
+			}
+			if err := json.Unmarshal(raw, &envelope); err != nil {
+				readErrCh <- fmt.Errorf("decode event type: %w", err)
+				return
+			}
+
+			switch envelope.EventType {
 			case "ACCOUNT_UPDATE":
-				updates, err := parseAccountUpdateEvent(payload)
+				updates, err := parseAccountUpdateEvent(raw)
 				if err != nil {
 					readErrCh <- fmt.Errorf("decode account update payload: %w", err)
 					return
@@ -411,14 +419,9 @@ func doListenKeyRequest(ctx context.Context, client *http.Client, cfg config, me
 	return resp, nil
 }
 
-func parseAccountUpdateEvent(event userDataEvent) ([]positionUpdate, error) {
-	encoded, err := json.Marshal(event)
-	if err != nil {
-		return nil, err
-	}
-
+func parseAccountUpdateEvent(raw []byte) ([]positionUpdate, error) {
 	var payload userDataAccountUpdateEvent
-	if err := json.Unmarshal(encoded, &payload); err != nil {
+	if err := json.Unmarshal(raw, &payload); err != nil {
 		return nil, err
 	}
 
