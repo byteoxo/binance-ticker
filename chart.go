@@ -114,6 +114,10 @@ func buildChartText(candles []klineCandle, noColor bool) string {
 	}
 	b.WriteString(fmt.Sprintf("low  %.2f\n", low))
 	b.WriteString(fmt.Sprintf("last close %.2f | candles %d", candles[len(candles)-1].CloseValue, len(candles)))
+	if line := buildIndicatorLine(candles); line != "" {
+		b.WriteString("\n")
+		b.WriteString(line)
+	}
 	return b.String()
 }
 

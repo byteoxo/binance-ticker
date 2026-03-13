@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -292,7 +293,29 @@ func parseWSTicker(data []byte) (priceTicker, error) {
 		return priceTicker{}, fmt.Errorf("missing required fields in websocket payload")
 	}
 
-	return priceTicker{Symbol: symbol, Price: price, Time: int64(eventTime)}, nil
+	parseFloat := func(key string) float64 {
+		raw, ok := payload[key]
+		if !ok {
+			return 0
+		}
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return 0
+		}
+		v, _ := strconv.ParseFloat(s, 64)
+		return v
+	}
+
+	return priceTicker{
+		Symbol:       symbol,
+		Price:        price,
+		Time:         int64(eventTime),
+		Change24h:    parseFloat("p"),
+		ChangePct24h: parseFloat("P"),
+		High24h:      parseFloat("h"),
+		Low24h:       parseFloat("l"),
+		Volume24h:    parseFloat("v"),
+	}, nil
 }
 
 func parseWSKline(data []byte) (klineCandle, error) {

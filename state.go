@@ -22,6 +22,14 @@ type rowState struct {
 	DeltaPct     float64
 	Updates      int
 	Status       string
+	// 24h stats
+	Change24h    float64
+	ChangePct24h float64
+	High24h      float64
+	Low24h       float64
+	Volume24h    float64
+	// price history for sparkline (last N closes)
+	PriceHistory []float64
 }
 
 type klineCandle struct {
@@ -40,9 +48,14 @@ type klineCandle struct {
 }
 
 type priceTicker struct {
-	Symbol string `json:"symbol"`
-	Price  string `json:"price"`
-	Time   int64  `json:"time"`
+	Symbol       string `json:"symbol"`
+	Price        string `json:"price"`
+	Time         int64  `json:"time"`
+	Change24h    float64
+	ChangePct24h float64
+	High24h      float64
+	Low24h       float64
+	Volume24h    float64
 }
 
 type positionRiskResponse struct {
@@ -111,6 +124,14 @@ const (
 	panelSpot    panelMode = "spot"
 )
 
+type fundingRate struct {
+	Symbol          string
+	MarkPrice       float64
+	IndexPrice      float64
+	LastFundingRate float64
+	NextFundingTime int64
+}
+
 type appState struct {
 	mu                    sync.RWMutex
 	rows                  map[string]rowState
@@ -119,6 +140,7 @@ type appState struct {
 	spotChart             []klineCandle
 	positions             []positionState
 	spotBalances          []spotBalance
+	fundingRates          map[string]fundingRate
 	futuresChartSymbol    string
 	spotChartSymbol       string
 	chartInterval         string
@@ -166,6 +188,7 @@ func newAppState(cfg config) *appState {
 	return &appState{
 		rows:               rows,
 		spotRows:           spotRows,
+		fundingRates:       make(map[string]fundingRate),
 		startedAt:          time.Now(),
 		accountEnabled:     cfg.hasAccountAuth(),
 		panel:              panel,
@@ -251,6 +274,15 @@ func (s *appState) applyTickerLocked(ticker priceTicker) {
 	current.Status = "ok"
 	current.Updates++
 
+	// 24h stats
+	if ticker.High24h > 0 {
+		current.Change24h = ticker.Change24h
+		current.ChangePct24h = ticker.ChangePct24h
+		current.High24h = ticker.High24h
+		current.Low24h = ticker.Low24h
+		current.Volume24h = ticker.Volume24h
+	}
+
 	value, err := strconv.ParseFloat(ticker.Price, 64)
 	if err == nil {
 		if current.Updates > 1 || current.PriceValue != 0 {
@@ -268,6 +300,11 @@ func (s *appState) applyTickerLocked(ticker priceTicker) {
 			current.Change = 0
 			current.Delta = 0
 			current.DeltaPct = 0
+		}
+		// maintain price history for sparkline (cap at sparklineHistory)
+		current.PriceHistory = append(current.PriceHistory, value)
+		if len(current.PriceHistory) > sparklineHistory {
+			current.PriceHistory = current.PriceHistory[len(current.PriceHistory)-sparklineHistory:]
 		}
 		s.refreshPositionMarketValueLocked(ticker.Symbol, value)
 	}
@@ -364,6 +401,14 @@ func (s *appState) applySpotTicker(ticker priceTicker) {
 	current.LocalTime = time.Now()
 	current.Status = "ok"
 	current.Updates++
+	// 24h stats
+	if ticker.High24h > 0 {
+		current.Change24h = ticker.Change24h
+		current.ChangePct24h = ticker.ChangePct24h
+		current.High24h = ticker.High24h
+		current.Low24h = ticker.Low24h
+		current.Volume24h = ticker.Volume24h
+	}
 	value, err := strconv.ParseFloat(ticker.Price, 64)
 	if err == nil {
 		if current.Updates > 1 || current.PriceValue != 0 {
@@ -381,6 +426,10 @@ func (s *appState) applySpotTicker(ticker priceTicker) {
 			current.Change = 0
 			current.Delta = 0
 			current.DeltaPct = 0
+		}
+		current.PriceHistory = append(current.PriceHistory, value)
+		if len(current.PriceHistory) > sparklineHistory {
+			current.PriceHistory = current.PriceHistory[len(current.PriceHistory)-sparklineHistory:]
 		}
 		for i := range s.spotBalances {
 			if s.spotBalances[i].PriceSymbol == ticker.Symbol {
@@ -624,6 +673,21 @@ func (s *appState) clearAccountError() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.accountError = ""
+}
+
+func (s *appState) setFundingRates(rates []fundingRate) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range rates {
+		s.fundingRates[r.Symbol] = r
+	}
+}
+
+func (s *appState) getFundingRate(symbol string) (fundingRate, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r, ok := s.fundingRates[symbol]
+	return r, ok
 }
 
 func (s *appState) getChartInterval() string {
