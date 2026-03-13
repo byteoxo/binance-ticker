@@ -23,6 +23,7 @@ type wsKlinePayload struct {
 	High      jsonFlexibleString `json:"h"`
 	Low       jsonFlexibleString `json:"l"`
 	Close     jsonFlexibleString `json:"c"`
+	Volume    jsonFlexibleString `json:"v"`
 	IsClosed  bool               `json:"x"`
 }
 

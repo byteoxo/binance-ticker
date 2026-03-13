@@ -37,9 +37,10 @@ const (
 	spotDepthPath             = "/api/v3/depth"
 	orderBookLimit            = 20
 	orderBookRefreshInterval  = time.Second
-	defaultChartInterval      = "1h"
-	sparklineHistory          = 20
+	defaultChartInterval       = "1h"
+	sparklineHistory           = 20
 	fundingRateRefreshInterval = 60 * time.Second
+	defaultVolumeHeight        = 4
 )
 
 var chartIntervals = []string{"1h", "2h", "4h", "1d", "3d"}

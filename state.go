@@ -44,6 +44,7 @@ type klineCandle struct {
 	HighValue  float64
 	LowValue   float64
 	CloseValue float64
+	Volume     float64
 	Closed     bool
 }
 
