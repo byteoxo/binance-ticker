@@ -8,8 +8,6 @@
 
 <img src="./assets/screenhot.png" alt="Binance Ticker 截图" width="760">
 
-<img src="./assets/example.gif" alt="Binance Ticker 演示" width="760">
-
 ## 功能
 
 - 通过 Binance WebSocket 实时订阅币安合约与现货行情
