@@ -30,11 +30,6 @@ type userDataListenKeyResponse struct {
 	ListenKey string `json:"listenKey"`
 }
 
-type userDataEvent struct {
-	EventType string `json:"e"`
-	ListenKey string `json:"listenKey"`
-}
-
 type userDataAccountUpdateEvent struct {
 	EventType string                `json:"e"`
 	EventTime jsonFlexibleInt64     `json:"E"`
