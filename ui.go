@@ -407,7 +407,7 @@ func (ui *uiModel) accountStatusText(accountEnabled bool, accountError string, a
 
 func (ui *uiModel) renderTable(rows []rowState) {
 	ui.table.Clear()
-	headers := []string{"SYMBOL", "PRICE", "DELTA", "EXCHANGE_TIME", "LOCAL_UPDATE"}
+	headers := []string{"SYMBOL", "PRICE", "24H%", "FUNDING", "TREND"}
 	for col, header := range headers {
 		cell := tview.NewTableCell(header).
 			SetSelectable(false).
@@ -424,16 +424,38 @@ func (ui *uiModel) renderTable(rows []rowState) {
 		if price == "" {
 			price = "-"
 		}
-		delta := formatDelta(row)
-		exchangeTime := formatEpoch(row.ExchangeTime, ui.loc)
-		localTime := formatOptionalTime(row.LocalTime, ui.loc)
+
+		pct24h := "-"
+		if row.High24h > 0 {
+			pct24h = fmt.Sprintf("%+.2f%%", row.ChangePct24h)
+		}
+		pct24hChange := 0
+		if row.ChangePct24h > 0 {
+			pct24hChange = 1
+		} else if row.ChangePct24h < 0 {
+			pct24hChange = -1
+		}
+
+		fundingText := "-"
+		if fr, ok := ui.state.getFundingRate(row.Symbol); ok {
+			fundingText = fmt.Sprintf("%+.4f%%", fr.LastFundingRate*100)
+		}
+		spark := buildSparkline(row.PriceHistory)
 
 		ui.table.SetCell(i+1, 0, tview.NewTableCell(row.Symbol).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
 		ui.table.SetCell(i+1, 1, tview.NewTableCell(ui.colorByChange(row.Change, price)).SetExpansion(1).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
-		ui.table.SetCell(i+1, 2, tview.NewTableCell(ui.colorByChange(row.Change, delta)).SetExpansion(1).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
-		ui.table.SetCell(i+1, 3, tview.NewTableCell(exchangeTime).SetExpansion(1).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
-		ui.table.SetCell(i+1, 4, tview.NewTableCell(localTime).SetExpansion(1).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.table.SetCell(i+1, 2, tview.NewTableCell(ui.colorByChange(pct24hChange, pct24h)).SetExpansion(1).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.table.SetCell(i+1, 3, tview.NewTableCell(ui.colorByChange(fundingColorDir(ui.state, row.Symbol), fundingText)).SetExpansion(1).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.table.SetCell(i+1, 4, tview.NewTableCell(spark).SetExpansion(1).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
 	}
+}
+
+func fundingColorDir(state *appState, symbol string) int {
+	fr, ok := state.getFundingRate(symbol)
+	if !ok {
+		return 0
+	}
+	return compareFloat(fr.LastFundingRate, 0)
 }
 
 func (ui *uiModel) renderPositions(positions []positionState, accountEnabled bool, accountError string, accountLastUpdate time.Time) {
@@ -488,7 +510,7 @@ func (ui *uiModel) renderPositions(positions []positionState, accountEnabled boo
 
 func (ui *uiModel) renderSpotTable(rows []rowState) {
 	ui.table.Clear()
-	headers := []string{"SYMBOL", "PRICE", "DELTA", "EXCHANGE_TIME", "LOCAL_UPDATE"}
+	headers := []string{"SYMBOL", "PRICE", "24H%", "TREND"}
 	for col, header := range headers {
 		cell := tview.NewTableCell(header).SetSelectable(false).SetAttributes(tcell.AttrBold).SetBackgroundColor(tcell.ColorDefault)
 		if !ui.cfg.NoColor {
@@ -501,11 +523,21 @@ func (ui *uiModel) renderSpotTable(rows []rowState) {
 		if price == "" {
 			price = "-"
 		}
+		pct24h := "-"
+		if row.High24h > 0 {
+			pct24h = fmt.Sprintf("%+.2f%%", row.ChangePct24h)
+		}
+		pct24hChange := 0
+		if row.ChangePct24h > 0 {
+			pct24hChange = 1
+		} else if row.ChangePct24h < 0 {
+			pct24hChange = -1
+		}
+		spark := buildSparkline(row.PriceHistory)
 		ui.table.SetCell(i+1, 0, tview.NewTableCell(row.Symbol).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
 		ui.table.SetCell(i+1, 1, tview.NewTableCell(ui.colorByChange(row.Change, price)).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
-		ui.table.SetCell(i+1, 2, tview.NewTableCell(ui.colorByChange(row.Change, formatDelta(row))).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
-		ui.table.SetCell(i+1, 3, tview.NewTableCell(formatEpoch(row.ExchangeTime, ui.loc)).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
-		ui.table.SetCell(i+1, 4, tview.NewTableCell(formatOptionalTime(row.LocalTime, ui.loc)).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.table.SetCell(i+1, 2, tview.NewTableCell(ui.colorByChange(pct24hChange, pct24h)).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.table.SetCell(i+1, 3, tview.NewTableCell(spark).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
 	}
 }
 
@@ -563,8 +595,36 @@ func (ui *uiModel) renderChart(candles []klineCandle, symbol, interval string) {
 	if interval == "" {
 		interval = defaultChartInterval
 	}
-	ui.chart.SetTitle(fmt.Sprintf("%s Chart - %s", strings.ToUpper(interval), symbol))
+	title := fmt.Sprintf("%s Chart - %s", strings.ToUpper(interval), symbol)
+	if len(candles) >= 15 {
+		closes := make([]float64, len(candles))
+		for i, c := range candles {
+			closes[i] = c.CloseValue
+		}
+		rsi := calcRSI(closes, 14)
+		if !isNaN(rsi) {
+			var rsiColor string
+			switch {
+			case rsi >= 70:
+				rsiColor = bearColorTag
+			case rsi <= 30:
+				rsiColor = bullColorTag
+			default:
+				rsiColor = neutralColorTag
+			}
+			if !ui.cfg.NoColor {
+				title += fmt.Sprintf(" [%s](RSI %.0f)[-]", rsiColor, rsi)
+			} else {
+				title += fmt.Sprintf(" (RSI %.0f)", rsi)
+			}
+		}
+	}
+	ui.chart.SetTitle(title)
 	ui.chart.SetText(buildChartText(candles, ui.cfg.NoColor))
+}
+
+func isNaN(f float64) bool {
+	return f != f
 }
 
 func (ui *uiModel) colorize(color, text string) string {
