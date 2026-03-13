@@ -106,6 +106,35 @@ func buildChartText(candles []klineCandle, noColor bool) string {
 		}
 	}
 
+	// Volume bars
+	volRows := make([][]string, defaultVolumeHeight)
+	for y := range volRows {
+		volRows[y] = make([]string, chartWidth)
+		for x := range volRows[y] {
+			volRows[y][x] = " "
+		}
+	}
+	maxVol := 0.0
+	for _, c := range candles {
+		if c.Volume > maxVol {
+			maxVol = c.Volume
+		}
+	}
+	if maxVol > 0 {
+		for i, candle := range candles {
+			wickX := i * chartStride
+			barH := int(math.Round(candle.Volume / maxVol * float64(defaultVolumeHeight)))
+			color := bullColorTag
+			if candle.CloseValue < candle.OpenValue {
+				color = bearColorTag
+			}
+			for row := 0; row < barH; row++ {
+				y := defaultVolumeHeight - 1 - row
+				volRows[y][wickX] = uiGlyph("█", noColor, color)
+			}
+		}
+	}
+
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("high %.2f\n", high))
 	for _, row := range rows {
@@ -113,6 +142,10 @@ func buildChartText(candles []klineCandle, noColor bool) string {
 		b.WriteString("\n")
 	}
 	b.WriteString(fmt.Sprintf("low  %.2f\n", low))
+	for _, row := range volRows {
+		b.WriteString(strings.Join(row, ""))
+		b.WriteString("\n")
+	}
 	b.WriteString(fmt.Sprintf("last close %.2f | candles %d", candles[len(candles)-1].CloseValue, len(candles)))
 	if line := buildIndicatorLine(candles); line != "" {
 		b.WriteString("\n")

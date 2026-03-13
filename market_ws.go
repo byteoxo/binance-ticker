@@ -332,6 +332,7 @@ func parseWSKline(data []byte) (klineCandle, error) {
 		string(payload.Kline.High),
 		string(payload.Kline.Low),
 		string(payload.Kline.Close),
+		string(payload.Kline.Volume),
 		payload.Kline.IsClosed,
 	)
 }

@@ -400,15 +400,19 @@ func parseRESTKline(symbol string, item []interface{}) (klineCandle, error) {
 	if err != nil {
 		return klineCandle{}, err
 	}
+	volume, err := interfaceToString(item[5])
+	if err != nil {
+		return klineCandle{}, err
+	}
 	closeTime, err := interfaceToInt64(item[6])
 	if err != nil {
 		return klineCandle{}, err
 	}
 
-	return newKlineCandle(symbol, openTime, closeTime, open, high, low, closePrice, true)
+	return newKlineCandle(symbol, openTime, closeTime, open, high, low, closePrice, volume, true)
 }
 
-func newKlineCandle(symbol string, openTime, closeTime int64, open, high, low, closePrice string, closed bool) (klineCandle, error) {
+func newKlineCandle(symbol string, openTime, closeTime int64, open, high, low, closePrice, volume string, closed bool) (klineCandle, error) {
 	openValue, err := strconv.ParseFloat(open, 64)
 	if err != nil {
 		return klineCandle{}, err
@@ -425,6 +429,7 @@ func newKlineCandle(symbol string, openTime, closeTime int64, open, high, low, c
 	if err != nil {
 		return klineCandle{}, err
 	}
+	volumeValue, _ := strconv.ParseFloat(volume, 64)
 
 	return klineCandle{
 		Symbol:     symbol,
@@ -438,6 +443,7 @@ func newKlineCandle(symbol string, openTime, closeTime int64, open, high, low, c
 		HighValue:  highValue,
 		LowValue:   lowValue,
 		CloseValue: closeValue,
+		Volume:     volumeValue,
 		Closed:     closed,
 	}, nil
 }
