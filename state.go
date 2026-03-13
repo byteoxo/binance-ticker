@@ -121,6 +121,7 @@ type appState struct {
 	spotBalances          []spotBalance
 	futuresChartSymbol    string
 	spotChartSymbol       string
+	chartInterval         string
 	panel                 panelMode
 	modalMessage          string
 	startedAt             time.Time
@@ -170,6 +171,7 @@ func newAppState(cfg config) *appState {
 		panel:              panel,
 		futuresChartSymbol: futuresChartSymbol,
 		spotChartSymbol:    spotChartSymbol,
+		chartInterval:      defaultChartInterval,
 	}
 }
 
@@ -624,7 +626,22 @@ func (s *appState) clearAccountError() {
 	s.accountError = ""
 }
 
-func (s *appState) snapshot() ([]rowState, []rowState, []klineCandle, []positionState, []spotBalance, string, string, string, string, string, time.Time, time.Time, time.Time, time.Time, time.Time, bool, panelMode, string) {
+func (s *appState) getChartInterval() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.chartInterval == "" {
+		return defaultChartInterval
+	}
+	return s.chartInterval
+}
+
+func (s *appState) setChartInterval(interval string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.chartInterval = interval
+}
+
+func (s *appState) snapshot() ([]rowState, []rowState, []klineCandle, []positionState, []spotBalance, string, string, string, string, string, string, time.Time, time.Time, time.Time, time.Time, time.Time, bool, panelMode, string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -648,5 +665,9 @@ func (s *appState) snapshot() ([]rowState, []rowState, []klineCandle, []position
 		chart = append([]klineCandle(nil), s.spotChart...)
 		chartSymbol = s.spotChartSymbol
 	}
-	return rows, spotRows, chart, positions, spotBalances, chartSymbol, s.lastError, s.spotError, s.accountError, s.spotAccountError, s.startedAt, s.lastUpdate, s.spotLastUpdate, s.accountLastUpdate, s.spotAccountLastUpdate, s.accountEnabled, s.panel, s.modalMessage
+	chartInterval := s.chartInterval
+	if chartInterval == "" {
+		chartInterval = defaultChartInterval
+	}
+	return rows, spotRows, chart, positions, spotBalances, chartSymbol, chartInterval, s.lastError, s.spotError, s.accountError, s.spotAccountError, s.startedAt, s.lastUpdate, s.spotLastUpdate, s.accountLastUpdate, s.spotAccountLastUpdate, s.accountEnabled, s.panel, s.modalMessage
 }

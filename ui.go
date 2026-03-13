@@ -12,30 +12,31 @@ import (
 )
 
 type uiModel struct {
-	app             *tview.Application
-	pages           *tview.Pages
-	header          *tview.TextView
-	status          *tview.TextView
-	table           *tview.Table
-	positions       *tview.Table
-	chart           *tview.TextView
-	footer          *tview.TextView
-	help            tview.Primitive
-	cfg             config
-	loc             *time.Location
-	state           *appState
-	changeChart     func(int)
-	helpOpen        bool
-	orderBook       tview.Primitive
-	orderBookFrame  *tview.Frame
-	orderBookTable  *tview.Table
-	orderBookOpen   bool
-	orderBookCancel context.CancelFunc
-	orderBookSymbol string
+	app              *tview.Application
+	pages            *tview.Pages
+	header           *tview.TextView
+	status           *tview.TextView
+	table            *tview.Table
+	positions        *tview.Table
+	chart            *tview.TextView
+	footer           *tview.TextView
+	help             tview.Primitive
+	cfg              config
+	loc              *time.Location
+	state            *appState
+	changeChart      func(int)
+	changeInterval   func()
+	helpOpen         bool
+	orderBook        tview.Primitive
+	orderBookFrame   *tview.Frame
+	orderBookTable   *tview.Table
+	orderBookOpen    bool
+	orderBookCancel  context.CancelFunc
+	orderBookSymbol  string
 	orderBookBaseURL string
 }
 
-func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int)) *uiModel {
+func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int), changeInterval func()) *uiModel {
 	app := tview.NewApplication()
 	app.SetRoot(tview.NewBox(), true)
 	tview.Styles.PrimitiveBackgroundColor = tcell.ColorDefault
@@ -67,6 +68,7 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 		{"Tab", "Switch futures / spot panel"},
 		{"Up / Left", "Previous chart symbol"},
 		{"Down / Right", "Next chart symbol"},
+		{"i", "Cycle chart interval (1h→2h→4h→1d→3d)"},
 		{"o", "Open order book for current symbol"},
 		{"q", "Quit"},
 		{"Ctrl+C", "Quit"},
@@ -103,7 +105,7 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 		AddItem(nil, 0, 1, false).
 		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
 			AddItem(nil, 0, 1, false).
-			AddItem(helpFrame, 13, 0, false).
+			AddItem(helpFrame, 14, 0, false).
 			AddItem(nil, 0, 1, false), 64, 0, true).
 		AddItem(nil, 0, 1, false)
 
@@ -119,11 +121,11 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 	positions.SetBorder(true).SetTitle("Positions")
 	chart.SetBorder(true).SetTitle("1H Chart")
 	footer.SetBorder(true)
-	footer.SetText("/ or h help | Tab switch panel | Arrows switch chart | o order book | q / Ctrl+C quit")
+	footer.SetText("/ or h help | Tab switch panel | Arrows switch chart | i interval | o order book | q / Ctrl+C quit")
 
 	ob, obFrame, obTable := buildOrderBookUI()
 
-	ui := &uiModel{app: app, header: header, status: status, table: table, positions: positions, chart: chart, footer: footer, help: help, cfg: cfg, loc: loc, state: state, changeChart: changeChart, orderBook: ob, orderBookFrame: obFrame, orderBookTable: obTable}
+	ui := &uiModel{app: app, header: header, status: status, table: table, positions: positions, chart: chart, footer: footer, help: help, cfg: cfg, loc: loc, state: state, changeChart: changeChart, changeInterval: changeInterval, orderBook: ob, orderBookFrame: obFrame, orderBookTable: obTable}
 	ui.refresh()
 	ui.pages = tview.NewPages().
 		AddPage("main", ui.layout(), true, true).
@@ -131,7 +133,7 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 		AddPage("orderbook", ob, true, false)
 
 	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, modalMessage := ui.state.snapshot()
+		_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, modalMessage := ui.state.snapshot()
 		if modalMessage != "" {
 			switch event.Key() {
 			case tcell.KeyEsc, tcell.KeyEnter:
@@ -215,6 +217,14 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 		case 'h', 'H', '/':
 			ui.showHelp()
 			return nil
+		case 'i', 'I':
+			if ui.changeInterval != nil {
+				go func() {
+					ui.changeInterval()
+					ui.requestDraw()
+				}()
+			}
+			return nil
 		case 'o', 'O':
 			ui.showOrderBook()
 			return nil
@@ -238,7 +248,7 @@ func getChartSymbolForPanel(state *appState, panel panelMode) string {
 }
 
 func (ui *uiModel) togglePanel() {
-	_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, panel, _ := ui.state.snapshot()
+	_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, panel, _ := ui.state.snapshot()
 	switch panel {
 	case panelFutures:
 		if len(ui.cfg.SpotSymbols) == 0 {
@@ -322,7 +332,7 @@ func (ui *uiModel) refreshNow() {
 }
 
 func (ui *uiModel) refresh() {
-	rows, spotRows, chart, positions, spotBalances, chartSymbol, lastError, spotError, accountError, spotAccountError, startedAt, lastUpdate, spotLastUpdate, accountLastUpdate, spotAccountLastUpdate, accountEnabled, panel, modalMessage := ui.state.snapshot()
+	rows, spotRows, chart, positions, spotBalances, chartSymbol, chartInterval, lastError, spotError, accountError, spotAccountError, startedAt, lastUpdate, spotLastUpdate, accountLastUpdate, spotAccountLastUpdate, accountEnabled, panel, modalMessage := ui.state.snapshot()
 
 	accountMode := "disabled"
 	if accountEnabled {
@@ -367,13 +377,13 @@ func (ui *uiModel) refresh() {
 		ui.positions.SetTitle("Spot Balances")
 		ui.renderSpotTable(spotRows)
 		ui.renderSpotBalances(spotBalances, spotAccountError)
-		ui.renderChart(chart, chartSymbol)
+		ui.renderChart(chart, chartSymbol, chartInterval)
 	} else {
 		ui.table.SetTitle("Contracts")
 		ui.positions.SetTitle("Positions")
 		ui.renderTable(rows)
 		ui.renderPositions(positions, accountEnabled, accountError, accountLastUpdate)
-		ui.renderChart(chart, chartSymbol)
+		ui.renderChart(chart, chartSymbol, chartInterval)
 	}
 
 	if modalMessage != "" {
@@ -546,11 +556,14 @@ func buildSpotSummary(balances []spotBalance) string {
 	return b.String()
 }
 
-func (ui *uiModel) renderChart(candles []klineCandle, symbol string) {
+func (ui *uiModel) renderChart(candles []klineCandle, symbol, interval string) {
 	if symbol == "" {
 		symbol = ui.cfg.ChartSymbol
 	}
-	ui.chart.SetTitle(fmt.Sprintf("1H Chart - %s", symbol))
+	if interval == "" {
+		interval = defaultChartInterval
+	}
+	ui.chart.SetTitle(fmt.Sprintf("%s Chart - %s", strings.ToUpper(interval), symbol))
 	ui.chart.SetText(buildChartText(candles, ui.cfg.NoColor))
 }
 
@@ -595,7 +608,7 @@ func escapeTView(text string) string {
 }
 
 func printSnapshot(cfg config, loc *time.Location, state *appState) {
-	rows, spotRows, chart, positions, spotBalances, chartSymbol, lastError, spotError, accountError, spotAccountError, startedAt, lastUpdate, spotLastUpdate, accountLastUpdate, spotAccountLastUpdate, accountEnabled, panel, _ := state.snapshot()
+	rows, spotRows, chart, positions, spotBalances, chartSymbol, chartInterval, lastError, spotError, accountError, spotAccountError, startedAt, lastUpdate, spotLastUpdate, accountLastUpdate, spotAccountLastUpdate, accountEnabled, panel, _ := state.snapshot()
 
 	fmt.Printf("mode: ws\npanel: %s\nfutures symbols: %s\nspot symbols: %s\nconfig: %s\nstarted: %s\nfutures update: %s\nspot update: %s\n",
 		panel,
@@ -670,6 +683,6 @@ func printSnapshot(cfg config, loc *time.Location, state *appState) {
 		}
 	}
 	if len(chart) > 0 {
-		fmt.Printf("\n1H chart (%s):\n%s\n", chartSymbol, stripTViewTags(buildChartText(chart, true)))
+		fmt.Printf("\n%s chart (%s):\n%s\n", strings.ToUpper(chartInterval), chartSymbol, stripTViewTags(buildChartText(chart, true)))
 	}
 }

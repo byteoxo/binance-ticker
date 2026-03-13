@@ -234,7 +234,8 @@ func parseSpotBalance(item spotBalancePayload, allowed map[string]struct{}) (spo
 }
 
 func loadChartHistoryForSymbol(ctx context.Context, client *http.Client, baseURL string, panel panelMode, symbol string, limit int, state *appState) error {
-	klines, err := fetchKlines(ctx, client, baseURL, symbol, limit)
+	interval := state.getChartInterval()
+	klines, err := fetchKlines(ctx, client, baseURL, symbol, interval, limit)
 	if err != nil {
 		return err
 	}
@@ -242,8 +243,8 @@ func loadChartHistoryForSymbol(ctx context.Context, client *http.Client, baseURL
 	return nil
 }
 
-func fetchKlines(ctx context.Context, client *http.Client, baseURL, symbol string, limit int) ([]klineCandle, error) {
-	endpoint, err := buildKlineURL(baseURL, symbol, limit)
+func fetchKlines(ctx context.Context, client *http.Client, baseURL, symbol, interval string, limit int) ([]klineCandle, error) {
+	endpoint, err := buildKlineURL(baseURL, symbol, interval, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +281,7 @@ func fetchKlines(ctx context.Context, client *http.Client, baseURL, symbol strin
 	return klines, nil
 }
 
-func buildKlineURL(baseURL, symbol string, limit int) (string, error) {
+func buildKlineURL(baseURL, symbol, interval string, limit int) (string, error) {
 	parsed, err := url.Parse(baseURL)
 	if err != nil {
 		return "", fmt.Errorf("parse base url: %w", err)
@@ -290,9 +291,12 @@ func buildKlineURL(baseURL, symbol string, limit int) (string, error) {
 		parsed.Path = spotKlinePath
 	}
 
+	if interval == "" {
+		interval = defaultChartInterval
+	}
 	query := url.Values{}
 	query.Set("symbol", symbol)
-	query.Set("interval", "1h")
+	query.Set("interval", interval)
 	query.Set("limit", strconv.Itoa(limit))
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil

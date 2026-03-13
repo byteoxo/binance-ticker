@@ -8,7 +8,7 @@ import (
 
 func buildChartText(candles []klineCandle, noColor bool) string {
 	if len(candles) == 0 {
-		return "waiting for 1h kline data..."
+		return "waiting for kline data..."
 	}
 
 	if len(candles) > defaultChartLimit {

@@ -185,7 +185,7 @@ func isSpotTickerSymbolFunc(cfg config) func(string) bool {
 
 func getChartSymbolForActivePanel(state *appState) func() string {
 	return func() string {
-		_, _, _, _, _, chartSymbol, _, _, _, _, _, _, _, _, _, _, _, _ := state.snapshot()
+		_, _, _, _, _, chartSymbol, _, _, _, _, _, _, _, _, _, _, _, _, _ := state.snapshot()
 		return chartSymbol
 	}
 }
