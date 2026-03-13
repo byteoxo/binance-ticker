@@ -12,20 +12,27 @@ import (
 )
 
 type uiModel struct {
-	app         *tview.Application
-	pages       *tview.Pages
-	header      *tview.TextView
-	status      *tview.TextView
-	table       *tview.Table
-	positions   *tview.Table
-	chart       *tview.TextView
-	footer      *tview.TextView
-	help        tview.Primitive
-	cfg         config
-	loc         *time.Location
-	state       *appState
-	changeChart func(int)
-	helpOpen    bool
+	app             *tview.Application
+	pages           *tview.Pages
+	header          *tview.TextView
+	status          *tview.TextView
+	table           *tview.Table
+	positions       *tview.Table
+	chart           *tview.TextView
+	footer          *tview.TextView
+	help            tview.Primitive
+	cfg             config
+	loc             *time.Location
+	state           *appState
+	changeChart     func(int)
+	helpOpen        bool
+	orderBook       tview.Primitive
+	orderBookFrame  *tview.Frame
+	orderBookTable  *tview.Table
+	orderBookOpen   bool
+	orderBookCancel context.CancelFunc
+	orderBookSymbol string
+	orderBookBaseURL string
 }
 
 func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int)) *uiModel {
@@ -60,9 +67,10 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 		{"Tab", "Switch futures / spot panel"},
 		{"Up / Left", "Previous chart symbol"},
 		{"Down / Right", "Next chart symbol"},
+		{"o", "Open order book for current symbol"},
 		{"q", "Quit"},
 		{"Ctrl+C", "Quit"},
-		{"Esc", "Close help / modal"},
+		{"Esc", "Close help / modal / order book"},
 	}
 	for i, row := range helpRows {
 		helpTable.SetCell(i+1, 0, tview.NewTableCell(row[0]).SetSelectable(false))
@@ -95,7 +103,7 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 		AddItem(nil, 0, 1, false).
 		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
 			AddItem(nil, 0, 1, false).
-			AddItem(helpFrame, 12, 0, false).
+			AddItem(helpFrame, 13, 0, false).
 			AddItem(nil, 0, 1, false), 64, 0, true).
 		AddItem(nil, 0, 1, false)
 
@@ -111,13 +119,16 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 	positions.SetBorder(true).SetTitle("Positions")
 	chart.SetBorder(true).SetTitle("1H Chart")
 	footer.SetBorder(true)
-	footer.SetText("/ or h help | Tab switch panel | Arrows switch chart | q / Ctrl+C quit")
+	footer.SetText("/ or h help | Tab switch panel | Arrows switch chart | o order book | q / Ctrl+C quit")
 
-	ui := &uiModel{app: app, header: header, status: status, table: table, positions: positions, chart: chart, footer: footer, help: help, cfg: cfg, loc: loc, state: state, changeChart: changeChart}
+	ob, obFrame, obTable := buildOrderBookUI()
+
+	ui := &uiModel{app: app, header: header, status: status, table: table, positions: positions, chart: chart, footer: footer, help: help, cfg: cfg, loc: loc, state: state, changeChart: changeChart, orderBook: ob, orderBookFrame: obFrame, orderBookTable: obTable}
 	ui.refresh()
 	ui.pages = tview.NewPages().
 		AddPage("main", ui.layout(), true, true).
-		AddPage("help", help, true, false)
+		AddPage("help", help, true, false).
+		AddPage("orderbook", ob, true, false)
 
 	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, modalMessage := ui.state.snapshot()
@@ -153,6 +164,34 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 			}
 			return nil
 		}
+		if ui.orderBookOpen {
+			switch event.Key() {
+			case tcell.KeyEsc:
+				ui.hideOrderBook()
+				return nil
+			case tcell.KeyUp, tcell.KeyLeft:
+				if ui.changeChart != nil {
+					ui.changeChart(-1)
+				}
+				ui.restartOrderBook()
+				return nil
+			case tcell.KeyDown, tcell.KeyRight:
+				if ui.changeChart != nil {
+					ui.changeChart(1)
+				}
+				ui.restartOrderBook()
+				return nil
+			}
+			switch event.Rune() {
+			case 'o', 'O':
+				ui.hideOrderBook()
+				return nil
+			case 'r', 'R':
+				go ui.doOrderBookFetch(context.Background(), ui.orderBookBaseURL, ui.orderBookSymbol)
+				return nil
+			}
+			return nil
+		}
 
 		switch event.Key() {
 		case tcell.KeyCtrlC:
@@ -175,6 +214,9 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 		switch event.Rune() {
 		case 'h', 'H', '/':
 			ui.showHelp()
+			return nil
+		case 'o', 'O':
+			ui.showOrderBook()
 			return nil
 		case 'q', 'Q':
 			app.Stop()
