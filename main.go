@@ -37,10 +37,11 @@ const (
 	spotDepthPath             = "/api/v3/depth"
 	orderBookLimit            = 20
 	orderBookRefreshInterval  = time.Second
-	defaultChartInterval       = "1h"
-	sparklineHistory           = 20
-	fundingRateRefreshInterval = 60 * time.Second
-	defaultVolumeHeight        = 4
+	defaultChartInterval        = "1h"
+	sparklineHistory            = 20
+	fundingRateRefreshInterval  = 60 * time.Second
+	marketStatsRefreshInterval  = 30 * time.Second
+	defaultVolumeHeight         = 4
 )
 
 var chartIntervals = []string{"1h", "2h", "4h", "1d", "3d"}
@@ -222,6 +223,7 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 
 	if len(cfg.Symbols) > 0 {
 		go runFundingRateLoop(ctx, client, cfg, state, ui.requestDraw)
+		go runMarketStatsLoop(ctx, client, cfg, state, ui.requestDraw)
 	}
 	if cfg.hasAccountAuth() && len(cfg.Symbols) > 0 {
 		go runUserDataLoop(ctx, client, cfg, state, ui.requestDraw)

@@ -90,6 +90,21 @@ func mustLoadLocation(name string) *time.Location {
 	return loc
 }
 
+// formatCompactNumber formats large numbers with K/M/B suffixes (e.g. 1234567 → "1.23M").
+func formatCompactNumber(v float64) string {
+	abs := math.Abs(v)
+	switch {
+	case abs >= 1e9:
+		return trimTrailingZeros(fmt.Sprintf("%.2fB", v/1e9))
+	case abs >= 1e6:
+		return trimTrailingZeros(fmt.Sprintf("%.2fM", v/1e6))
+	case abs >= 1e3:
+		return trimTrailingZeros(fmt.Sprintf("%.2fK", v/1e3))
+	default:
+		return trimTrailingZeros(fmt.Sprintf("%.2f", v))
+	}
+}
+
 func minInt(a, b int) int {
 	if a < b {
 		return a

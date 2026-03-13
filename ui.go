@@ -407,7 +407,7 @@ func (ui *uiModel) accountStatusText(accountEnabled bool, accountError string, a
 
 func (ui *uiModel) renderTable(rows []rowState) {
 	ui.table.Clear()
-	headers := []string{"SYMBOL", "PRICE", "24H%", "FUNDING", "TREND"}
+	headers := []string{"SYMBOL", "PRICE", "24H%", "OI", "L/S", "FUNDING", "TREND"}
 	for col, header := range headers {
 		cell := tview.NewTableCell(header).
 			SetSelectable(false).
@@ -436,6 +436,27 @@ func (ui *uiModel) renderTable(rows []rowState) {
 			pct24hChange = -1
 		}
 
+		oiText := "-"
+		oiDir := 0
+		if oi, ok := ui.state.getOpenInterest(row.Symbol); ok && oi.OpenInterest > 0 {
+			oiText = formatCompactNumber(oi.OpenInterest)
+			if oi.PrevOpenInterest > 0 {
+				oiDir = compareFloat(oi.OpenInterest, oi.PrevOpenInterest)
+				if oiDir > 0 {
+					oiText += " ▲"
+				} else if oiDir < 0 {
+					oiText += " ▼"
+				}
+			}
+		}
+
+		lsText := "-"
+		lsDir := 0
+		if ls, ok := ui.state.getLongShortRatio(row.Symbol); ok && ls.Ratio > 0 {
+			lsText = fmt.Sprintf("%.2f", ls.Ratio)
+			lsDir = compareFloat(ls.Ratio, 1)
+		}
+
 		fundingText := "-"
 		if fr, ok := ui.state.getFundingRate(row.Symbol); ok {
 			fundingText = fmt.Sprintf("%+.4f%%", fr.LastFundingRate*100)
@@ -445,8 +466,10 @@ func (ui *uiModel) renderTable(rows []rowState) {
 		ui.table.SetCell(i+1, 0, tview.NewTableCell(row.Symbol).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
 		ui.table.SetCell(i+1, 1, tview.NewTableCell(ui.colorByChange(row.Change, price)).SetExpansion(1).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
 		ui.table.SetCell(i+1, 2, tview.NewTableCell(ui.colorByChange(pct24hChange, pct24h)).SetExpansion(1).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
-		ui.table.SetCell(i+1, 3, tview.NewTableCell(ui.colorByChange(fundingColorDir(ui.state, row.Symbol), fundingText)).SetExpansion(1).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
-		ui.table.SetCell(i+1, 4, tview.NewTableCell(spark).SetExpansion(1).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.table.SetCell(i+1, 3, tview.NewTableCell(ui.colorByChange(oiDir, oiText)).SetExpansion(1).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.table.SetCell(i+1, 4, tview.NewTableCell(ui.colorByChange(lsDir, lsText)).SetExpansion(1).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.table.SetCell(i+1, 5, tview.NewTableCell(ui.colorByChange(fundingColorDir(ui.state, row.Symbol), fundingText)).SetExpansion(1).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
+		ui.table.SetCell(i+1, 6, tview.NewTableCell(spark).SetExpansion(1).SetSelectable(false).SetBackgroundColor(tcell.ColorDefault))
 	}
 }
 
