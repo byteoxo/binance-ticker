@@ -94,7 +94,7 @@ func buildOrderBookUI() (tview.Primitive, *tview.Frame, *tview.Table) {
 }
 
 func (ui *uiModel) showOrderBook() {
-	_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, panel, _ := ui.state.snapshot()
+	_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, panel, _ := ui.state.snapshot()
 
 	var symbol, baseURL string
 	switch panel {
@@ -122,7 +122,7 @@ func (ui *uiModel) showOrderBook() {
 }
 
 func (ui *uiModel) restartOrderBook() {
-	_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, panel, _ := ui.state.snapshot()
+	_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, panel, _ := ui.state.snapshot()
 	var symbol, baseURL string
 	switch panel {
 	case panelSpot:

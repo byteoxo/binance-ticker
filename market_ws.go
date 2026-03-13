@@ -16,7 +16,7 @@ var (
 	errResubscribe = errors.New("market stream resubscribe requested")
 )
 
-func runWSLoop(ctx context.Context, cfg config, state *appState, notify func(), getChartSymbol func() string, getTickerSymbols func() []string, isSpotChartSymbol func(string) bool) error {
+func runWSLoop(ctx context.Context, cfg config, state *appState, notify func(), getChartSymbol func() string, getChartInterval func() string, getTickerSymbols func() []string, isSpotChartSymbol func(string) bool) error {
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -25,7 +25,7 @@ func runWSLoop(ctx context.Context, cfg config, state *appState, notify func(), 
 		state.setError("connecting websocket...")
 		notify()
 
-		err := consumeWS(ctx, cfg, state, notify, getChartSymbol, getTickerSymbols, isSpotChartSymbol)
+		err := consumeWS(ctx, cfg, state, notify, getChartSymbol, getChartInterval, getTickerSymbols, isSpotChartSymbol)
 		if err == nil || ctx.Err() != nil {
 			return nil
 		}
@@ -44,12 +44,13 @@ func runWSLoop(ctx context.Context, cfg config, state *appState, notify func(), 
 	}
 }
 
-func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), getChartSymbol func() string, getTickerSymbols func() []string, isSpotChartSymbol func(string) bool) error {
+func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), getChartSymbol func() string, getChartInterval func() string, getTickerSymbols func() []string, isSpotChartSymbol func(string) bool) error {
 	chartSymbol := getChartSymbol()
 	if isSpotChartSymbol(chartSymbol) {
 		chartSymbol = ""
 	}
-	endpoint := buildWSURL(cfg.WSBase, getTickerSymbols(), chartSymbol)
+	chartInterval := getChartInterval()
+	endpoint := buildWSURL(cfg.WSBase, getTickerSymbols(), chartSymbol, chartInterval)
 	dialer := websocket.Dialer{HandshakeTimeout: cfg.Timeout}
 	conn, _, err := dialer.DialContext(ctx, endpoint, nil)
 	if err != nil {
@@ -70,7 +71,8 @@ func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), 
 	defer pingTicker.Stop()
 	resubscribeTicker := time.NewTicker(time.Second)
 	defer resubscribeTicker.Stop()
-	baselineSymbols := strings.Join(getTickerSymbols(), ",") + "|" + chartSymbol
+	klineStreamSuffix := "@kline_" + chartInterval
+	baselineSymbols := strings.Join(getTickerSymbols(), ",") + "|" + chartSymbol + "|" + chartInterval
 
 	readErrCh := make(chan error, 1)
 	go func() {
@@ -91,7 +93,7 @@ func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), 
 				}
 				state.applyTicker(ticker)
 				notify()
-			case strings.HasSuffix(envelope.Stream, "@kline_1h"):
+			case strings.HasSuffix(envelope.Stream, klineStreamSuffix):
 				candle, err := parseWSKline(envelope.Data)
 				if err != nil {
 					readErrCh <- fmt.Errorf("decode websocket kline payload: %w", err)
@@ -127,7 +129,7 @@ func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), 
 			if isSpotChartSymbol(currentChartSymbol) {
 				currentChartSymbol = ""
 			}
-			currentSymbols := strings.Join(getTickerSymbols(), ",") + "|" + currentChartSymbol
+			currentSymbols := strings.Join(getTickerSymbols(), ",") + "|" + currentChartSymbol + "|" + getChartInterval()
 			if currentSymbols != baselineSymbols {
 				state.setError("updating market subscriptions...")
 				notify()
@@ -146,7 +148,7 @@ func runSpotWSLoop(ctx context.Context, cfg config, state *appState, notify func
 		state.setSpotError("connecting spot websocket...")
 		notify()
 
-		err := consumeSpotWS(ctx, cfg, state, notify, getSpotTickerSymbols, getChartSymbolForActivePanel(state), isSpotTickerSymbolFunc(cfg))
+		err := consumeSpotWS(ctx, cfg, state, notify, getSpotTickerSymbols, getChartSymbolForActivePanel(state), state.getChartInterval, isSpotTickerSymbolFunc(cfg))
 		if err == nil || ctx.Err() != nil {
 			return nil
 		}
@@ -165,12 +167,13 @@ func runSpotWSLoop(ctx context.Context, cfg config, state *appState, notify func
 	}
 }
 
-func consumeSpotWS(ctx context.Context, cfg config, state *appState, notify func(), getSpotTickerSymbols func() []string, getChartSymbol func() string, isSpotChartSymbol func(string) bool) error {
+func consumeSpotWS(ctx context.Context, cfg config, state *appState, notify func(), getSpotTickerSymbols func() []string, getChartSymbol func() string, getChartInterval func() string, isSpotChartSymbol func(string) bool) error {
 	chartSymbol := getChartSymbol()
 	if !isSpotChartSymbol(chartSymbol) {
 		chartSymbol = ""
 	}
-	endpoint := buildWSURL(defaultSpotWSBaseURL, getSpotTickerSymbols(), chartSymbol)
+	chartInterval := getChartInterval()
+	endpoint := buildWSURL(defaultSpotWSBaseURL, getSpotTickerSymbols(), chartSymbol, chartInterval)
 	dialer := websocket.Dialer{HandshakeTimeout: cfg.Timeout}
 	conn, _, err := dialer.DialContext(ctx, endpoint, nil)
 	if err != nil {
@@ -191,7 +194,8 @@ func consumeSpotWS(ctx context.Context, cfg config, state *appState, notify func
 	defer pingTicker.Stop()
 	resubscribeTicker := time.NewTicker(time.Second)
 	defer resubscribeTicker.Stop()
-	baselineSymbols := strings.Join(getSpotTickerSymbols(), ",") + "|" + chartSymbol
+	klineStreamSuffix := "@kline_" + chartInterval
+	baselineSymbols := strings.Join(getSpotTickerSymbols(), ",") + "|" + chartSymbol + "|" + chartInterval
 
 	readErrCh := make(chan error, 1)
 	go func() {
@@ -211,7 +215,7 @@ func consumeSpotWS(ctx context.Context, cfg config, state *appState, notify func
 				}
 				state.applySpotTicker(ticker)
 				notify()
-			case strings.HasSuffix(envelope.Stream, "@kline_1h"):
+			case strings.HasSuffix(envelope.Stream, klineStreamSuffix):
 				candle, err := parseWSKline(envelope.Data)
 				if err != nil {
 					readErrCh <- fmt.Errorf("decode spot websocket kline payload: %w", err)
@@ -247,7 +251,7 @@ func consumeSpotWS(ctx context.Context, cfg config, state *appState, notify func
 			if !isSpotChartSymbol(currentChartSymbol) {
 				currentChartSymbol = ""
 			}
-			currentSymbols := strings.Join(getSpotTickerSymbols(), ",") + "|" + currentChartSymbol
+			currentSymbols := strings.Join(getSpotTickerSymbols(), ",") + "|" + currentChartSymbol + "|" + getChartInterval()
 			if currentSymbols != baselineSymbols {
 				state.setSpotError("updating spot subscriptions...")
 				notify()
@@ -309,14 +313,17 @@ func parseWSKline(data []byte) (klineCandle, error) {
 	)
 }
 
-func buildWSURL(baseURL string, symbols []string, chartSymbol string) string {
+func buildWSURL(baseURL string, symbols []string, chartSymbol, chartInterval string) string {
 	symbols = normalizeSymbolList(symbols)
 	streams := make([]string, 0, len(symbols)+1)
 	for _, symbol := range symbols {
 		streams = append(streams, strings.ToLower(symbol)+"@ticker")
 	}
 	if chartSymbol != "" {
-		streams = append(streams, strings.ToLower(chartSymbol)+"@kline_1h")
+		if chartInterval == "" {
+			chartInterval = defaultChartInterval
+		}
+		streams = append(streams, strings.ToLower(chartSymbol)+"@kline_"+chartInterval)
 	}
 	return baseURL + "/stream?streams=" + strings.Join(streams, "/")
 }

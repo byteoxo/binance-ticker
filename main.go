@@ -37,7 +37,10 @@ const (
 	spotDepthPath             = "/api/v3/depth"
 	orderBookLimit            = 20
 	orderBookRefreshInterval  = time.Second
+	defaultChartInterval      = "1h"
 )
+
+var chartIntervals = []string{"1h", "2h", "4h", "1d", "3d"}
 
 func main() {
 	log.SetFlags(0)
@@ -83,9 +86,10 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 	}
 
 	getChartSymbol := func() string {
-		_, _, _, _, _, chartSymbol, _, _, _, _, _, _, _, _, _, _, _, _ := state.snapshot()
+		_, _, _, _, _, chartSymbol, _, _, _, _, _, _, _, _, _, _, _, _, _ := state.snapshot()
 		return chartSymbol
 	}
+	getChartInterval := state.getChartInterval
 	setChartSymbol := func(panel panelMode, symbol string) {
 		state.mu.Lock()
 		defer state.mu.Unlock()
@@ -96,7 +100,7 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 		}
 	}
 	getTickerSymbols := func() []string {
-		_, _, _, positions, _, _, _, _, _, _, _, _, _, _, _, _, _, _ := state.snapshot()
+		_, _, _, positions, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ := state.snapshot()
 		combined := make([]string, 0, len(cfg.Symbols)+len(positions))
 		combined = append(combined, cfg.Symbols...)
 		for _, position := range positions {
@@ -108,8 +112,42 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 		return spotSymbolsToTickers(cfg.SpotSymbols)
 	}
 
+	changeInterval := func() {
+		current := state.getChartInterval()
+		idx := 0
+		for i, iv := range chartIntervals {
+			if iv == current {
+				idx = i
+				break
+			}
+		}
+		next := chartIntervals[(idx+1)%len(chartIntervals)]
+		state.setChartInterval(next)
+		// Clear both charts so stale candles from old interval are not shown.
+		state.mu.Lock()
+		state.futuresChart = nil
+		state.spotChart = nil
+		state.mu.Unlock()
+		// Reload history for the active panel's current symbol.
+		_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, panel, _ := state.snapshot()
+		switch panel {
+		case panelSpot:
+			if sym := getChartSymbolForPanel(state, panelSpot); sym != "" {
+				if err := loadChartHistoryForSymbol(ctx, client, defaultSpotRESTBaseURL, panelSpot, sym, cfg.ChartLimit, state); err != nil {
+					state.setSpotError(fmt.Sprintf("chart interval switch failed: %v", err))
+				}
+			}
+		default:
+			if sym := getChartSymbolForPanel(state, panelFutures); sym != "" {
+				if err := loadChartHistoryForSymbol(ctx, client, cfg.RESTBase, panelFutures, sym, cfg.ChartLimit, state); err != nil {
+					state.setError(fmt.Sprintf("chart interval switch failed: %v", err))
+				}
+			}
+		}
+	}
+
 	changeChart := func(offset int) {
-		_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, panel, _ := state.snapshot()
+		_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, panel, _ := state.snapshot()
 
 		var symbols []string
 		var baseURL string
@@ -159,7 +197,7 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 		clearErr()
 	}
 
-	ui := newUI(cfg, loc, state, changeChart)
+	ui := newUI(cfg, loc, state, changeChart, changeInterval)
 	errCh := make(chan error, 1)
 
 	go func() {
@@ -170,7 +208,7 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 	}()
 
 	go func() {
-		err := runWSLoop(ctx, cfg, state, ui.requestDraw, getChartSymbol, getTickerSymbols, isSpotTickerSymbolFunc(cfg))
+		err := runWSLoop(ctx, cfg, state, ui.requestDraw, getChartSymbol, getChartInterval, getTickerSymbols, isSpotTickerSymbolFunc(cfg))
 		if err != nil {
 			select {
 			case errCh <- err:
