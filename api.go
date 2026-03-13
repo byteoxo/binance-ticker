@@ -90,6 +90,119 @@ func fetchFundingRates(ctx context.Context, client *http.Client, baseURL string,
 	return rates, nil
 }
 
+func runMarketStatsLoop(ctx context.Context, client *http.Client, cfg config, state *appState, notify func()) {
+	fetch := func() {
+		for _, symbol := range cfg.Symbols {
+			if oi, err := fetchOpenInterest(ctx, client, cfg.RESTBase, symbol); err == nil {
+				state.setOpenInterest(oi)
+			}
+			if ls, err := fetchLongShortRatio(ctx, client, cfg.RESTBase, symbol); err == nil {
+				state.setLongShortRatio(ls)
+			}
+		}
+		notify()
+	}
+	fetch()
+	ticker := time.NewTicker(marketStatsRefreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			fetch()
+		}
+	}
+}
+
+func fetchOpenInterest(ctx context.Context, client *http.Client, baseURL, symbol string) (openInterestData, error) {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return openInterestData{}, err
+	}
+	parsed.Path = "/fapi/v1/openInterest"
+	q := url.Values{}
+	q.Set("symbol", symbol)
+	parsed.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return openInterestData{}, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return openInterestData{}, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return openInterestData{}, fmt.Errorf("open interest status %s", resp.Status)
+	}
+
+	var payload struct {
+		Symbol       string `json:"symbol"`
+		OpenInterest string `json:"openInterest"`
+		Time         int64  `json:"time"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return openInterestData{}, err
+	}
+	oi, _ := strconv.ParseFloat(payload.OpenInterest, 64)
+	return openInterestData{Symbol: payload.Symbol, OpenInterest: oi, Time: payload.Time}, nil
+}
+
+func fetchLongShortRatio(ctx context.Context, client *http.Client, baseURL, symbol string) (longShortRatioData, error) {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return longShortRatioData{}, err
+	}
+	parsed.Path = "/futures/data/globalLongShortAccountRatio"
+	q := url.Values{}
+	q.Set("symbol", symbol)
+	q.Set("period", "5m")
+	q.Set("limit", "1")
+	parsed.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return longShortRatioData{}, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return longShortRatioData{}, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return longShortRatioData{}, fmt.Errorf("long short ratio status %s", resp.Status)
+	}
+
+	var payload []struct {
+		Symbol         string `json:"symbol"`
+		LongShortRatio string `json:"longShortRatio"`
+		LongAccount    string `json:"longAccount"`
+		ShortAccount   string `json:"shortAccount"`
+		Timestamp      int64  `json:"timestamp"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return longShortRatioData{}, err
+	}
+	if len(payload) == 0 {
+		return longShortRatioData{}, fmt.Errorf("empty long short ratio response")
+	}
+	p := payload[0]
+	ratio, _ := strconv.ParseFloat(p.LongShortRatio, 64)
+	longAcc, _ := strconv.ParseFloat(p.LongAccount, 64)
+	shortAcc, _ := strconv.ParseFloat(p.ShortAccount, 64)
+	return longShortRatioData{
+		Symbol:       p.Symbol,
+		Ratio:        ratio,
+		LongAccount:  longAcc,
+		ShortAccount: shortAcc,
+		Timestamp:    p.Timestamp,
+	}, nil
+}
+
 func loadChartHistory(ctx context.Context, client *http.Client, cfg config, state *appState) error {
 	return loadChartHistoryForSymbol(ctx, client, cfg.RESTBase, panelFutures, cfg.ChartSymbol, cfg.ChartLimit, state)
 }

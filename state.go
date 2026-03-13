@@ -133,6 +133,21 @@ type fundingRate struct {
 	NextFundingTime int64
 }
 
+type openInterestData struct {
+	Symbol           string
+	OpenInterest     float64
+	PrevOpenInterest float64
+	Time             int64
+}
+
+type longShortRatioData struct {
+	Symbol       string
+	LongAccount  float64
+	ShortAccount float64
+	Ratio        float64
+	Timestamp    int64
+}
+
 type appState struct {
 	mu                    sync.RWMutex
 	rows                  map[string]rowState
@@ -142,6 +157,8 @@ type appState struct {
 	positions             []positionState
 	spotBalances          []spotBalance
 	fundingRates          map[string]fundingRate
+	openInterests         map[string]openInterestData
+	longShortRatios       map[string]longShortRatioData
 	futuresChartSymbol    string
 	spotChartSymbol       string
 	chartInterval         string
@@ -190,6 +207,8 @@ func newAppState(cfg config) *appState {
 		rows:               rows,
 		spotRows:           spotRows,
 		fundingRates:       make(map[string]fundingRate),
+		openInterests:      make(map[string]openInterestData),
+		longShortRatios:    make(map[string]longShortRatioData),
 		startedAt:          time.Now(),
 		accountEnabled:     cfg.hasAccountAuth(),
 		panel:              panel,
@@ -689,6 +708,35 @@ func (s *appState) getFundingRate(symbol string) (fundingRate, bool) {
 	defer s.mu.RUnlock()
 	r, ok := s.fundingRates[symbol]
 	return r, ok
+}
+
+func (s *appState) setOpenInterest(data openInterestData) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if prev, ok := s.openInterests[data.Symbol]; ok && prev.OpenInterest > 0 {
+		data.PrevOpenInterest = prev.OpenInterest
+	}
+	s.openInterests[data.Symbol] = data
+}
+
+func (s *appState) getOpenInterest(symbol string) (openInterestData, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	d, ok := s.openInterests[symbol]
+	return d, ok
+}
+
+func (s *appState) setLongShortRatio(data longShortRatioData) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.longShortRatios[data.Symbol] = data
+}
+
+func (s *appState) getLongShortRatio(symbol string) (longShortRatioData, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	d, ok := s.longShortRatios[symbol]
+	return d, ok
 }
 
 func (s *appState) getChartInterval() string {
