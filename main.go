@@ -33,6 +33,10 @@ const (
 	bullColorTag              = "#00c853"
 	bearColorTag              = "#e53935"
 	neutralColorTag           = "#9aa0a6"
+	futuresDepthPath          = "/fapi/v1/depth"
+	spotDepthPath             = "/api/v3/depth"
+	orderBookLimit            = 20
+	orderBookRefreshInterval  = time.Second
 )
 
 func main() {
