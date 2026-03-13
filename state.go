@@ -541,10 +541,20 @@ func (s *appState) applyPositionUpdates(updates []positionUpdate) {
 		if update.Remove {
 			if exists {
 				s.positions = append(s.positions[:idx], s.positions[idx+1:]...)
-				indexByKey = make(map[string]int, len(s.positions))
-				for i, position := range s.positions {
-					indexByKey[position.Symbol+"|"+position.Side] = i
+			} else if update.Side == "" {
+				// One-way mode (BOTH): size is 0 so side can't be inferred.
+				// Remove all positions with this symbol.
+				filtered := s.positions[:0]
+				for _, p := range s.positions {
+					if p.Symbol != update.Symbol {
+						filtered = append(filtered, p)
+					}
 				}
+				s.positions = filtered
+			}
+			indexByKey = make(map[string]int, len(s.positions))
+			for i, position := range s.positions {
+				indexByKey[position.Symbol+"|"+position.Side] = i
 			}
 			continue
 		}
