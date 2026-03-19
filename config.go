@@ -12,6 +12,7 @@ import (
 )
 
 type config struct {
+	Exchange     string
 	Symbols      []string
 	SpotSymbols  []string
 	ChartSymbol  string
@@ -29,6 +30,7 @@ type config struct {
 }
 
 type rawConfig struct {
+	Exchange     string   `toml:"exchange"`
 	Symbols      []string `toml:"symbols"`
 	SpotSymbols  []string `toml:"spot_symbols"`
 	ChartSymbol  string   `toml:"chart_symbol"`
@@ -52,6 +54,34 @@ func (cfg config) hasSpot() bool {
 	return len(cfg.SpotSymbols) > 0
 }
 
+func (cfg config) isGate() bool {
+	return cfg.Exchange == "gate"
+}
+
+func envAPIKeyName(exchange string) string {
+	if exchange == "gate" {
+		return "GATE_API_KEY"
+	}
+	return "BINANCE_API_KEY"
+}
+
+func envAPISecretName(exchange string) string {
+	if exchange == "gate" {
+		return "GATE_API_SECRET"
+	}
+	return "BINANCE_API_SECRET"
+}
+
+// exchangeDefaults returns (restBase, wsBase) defaults for futures panel.
+func exchangeDefaults(exchange string) (string, string) {
+	switch exchange {
+	case "gate":
+		return defaultGateRESTBaseURL, defaultGateWSBaseURL
+	default:
+		return defaultRESTBaseURL, defaultWSBaseURL
+	}
+}
+
 func mustLoadConfig() config {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -72,11 +102,19 @@ func loadConfig() (config, error) {
 		return config{}, fmt.Errorf("decode config %s: %w", path, err)
 	}
 
-	required := []string{"symbols", "chart_symbol", "chart_limit", "default_panel", "timeout", "tz", "rest_base", "ws_base", "no_color", "retry_delay"}
+	required := []string{"symbols", "chart_symbol", "chart_limit", "default_panel", "timeout", "tz", "no_color", "retry_delay"}
 	for _, key := range required {
 		if !meta.IsDefined(key) {
 			return config{}, fmt.Errorf("config %s missing required field %q", path, key)
 		}
+	}
+
+	exchange := strings.ToLower(strings.TrimSpace(raw.Exchange))
+	if exchange == "" {
+		exchange = "binance"
+	}
+	if exchange != "binance" && exchange != "gate" {
+		return config{}, fmt.Errorf("config %s field %q must be one of %q or %q", path, "exchange", "binance", "gate")
 	}
 
 	symbols := normalizeSymbols(strings.Join(raw.Symbols, ","))
@@ -113,6 +151,15 @@ func loadConfig() (config, error) {
 
 	apiKey := strings.TrimSpace(raw.APIKey)
 	apiSecret := strings.TrimSpace(raw.APISecret)
+	// Environment variables override config file values.
+	// Binance: BINANCE_API_KEY / BINANCE_API_SECRET
+	// Gate.io: GATE_API_KEY   / GATE_API_SECRET
+	if v := os.Getenv(envAPIKeyName(exchange)); v != "" {
+		apiKey = v
+	}
+	if v := os.Getenv(envAPISecretName(exchange)); v != "" {
+		apiSecret = v
+	}
 	if (apiKey == "") != (apiSecret == "") {
 		return config{}, fmt.Errorf("config %s requires both %q and %q when account auth is enabled", path, "api_key", "api_secret")
 	}
@@ -122,15 +169,26 @@ func loadConfig() (config, error) {
 		return config{}, fmt.Errorf("config %s field %q cannot be empty", path, "tz")
 	}
 	restBase := strings.TrimRight(strings.TrimSpace(raw.RESTBase), "/")
+	wsBase := strings.TrimRight(strings.TrimSpace(raw.WSBase), "/")
+	// Apply exchange-specific defaults when not explicitly set.
+	if restBase == "" || wsBase == "" {
+		defREST, defWS := exchangeDefaults(exchange)
+		if restBase == "" {
+			restBase = defREST
+		}
+		if wsBase == "" {
+			wsBase = defWS
+		}
+	}
 	if restBase == "" {
 		return config{}, fmt.Errorf("config %s field %q cannot be empty", path, "rest_base")
 	}
-	wsBase := strings.TrimRight(strings.TrimSpace(raw.WSBase), "/")
 	if wsBase == "" {
 		return config{}, fmt.Errorf("config %s field %q cannot be empty", path, "ws_base")
 	}
 
 	return config{
+		Exchange:     exchange,
 		Symbols:      symbols,
 		SpotSymbols:  spotSymbols,
 		ChartSymbol:  chartSymbol,
@@ -156,7 +214,7 @@ func resolveConfigPath() (string, error) {
 
 	candidates := []string{
 		"./config.toml",
-		filepath.Join(homeDir, ".config", "binance-ticker", "config.toml"),
+		filepath.Join(homeDir, ".config", "crypto-ticker", "config.toml"),
 	}
 
 	for _, candidate := range candidates {

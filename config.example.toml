@@ -1,3 +1,9 @@
+# Exchange: "binance" (default) or "gate"
+# When exchange is "binance", rest_base and ws_base default to Binance Futures endpoints.
+# When exchange is "gate", they default to Gate.io Futures endpoints.
+# You can override rest_base and ws_base explicitly if needed.
+exchange = "binance"
+
 symbols = ["ETHUSDT", "BTCUSDT", "SOLUSDT"]
 spot_symbols = ["ZKC", "BARD"]
 chart_symbol = "ETHUSDT"
@@ -5,8 +11,9 @@ chart_limit = 8
 default_panel = "futures"
 timeout = "8s"
 tz = "Asia/Shanghai"
-rest_base = "https://fapi.binance.com"
-ws_base = "wss://fstream.binance.com"
+# rest_base and ws_base are optional when exchange is set — defaults are applied automatically.
+# rest_base = "https://fapi.binance.com"
+# ws_base   = "wss://fstream.binance.com"
 no_color = false
 retry_delay = "2s"
 api_key = ""

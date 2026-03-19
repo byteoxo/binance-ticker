@@ -1,0 +1,18 @@
+# Gate.io configuration example
+# Gate.io uses underscore-separated pairs: BTC_USDT, ETH_USDT
+exchange = "gate"
+
+symbols = ["BTC_USDT", "ETH_USDT", "SOL_USDT"]
+spot_symbols = ["BTC_USDT", "ETH_USDT"]
+chart_symbol = "BTC_USDT"
+chart_limit = 8
+default_panel = "futures"
+timeout = "8s"
+tz = "Asia/Shanghai"
+# Defaults applied automatically for gate exchange:
+# rest_base = "https://fx-api.gateio.ws"
+# ws_base   = "wss://fx-ws.gateio.ws/v4/ws/usdt"
+no_color = false
+retry_delay = "2s"
+api_key = ""
+api_secret = ""
