@@ -1,6 +1,6 @@
 version: 2
 
-project_name: binance-ticker
+project_name: crypto-ticker
 
 before:
   hooks:
