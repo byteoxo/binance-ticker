@@ -68,7 +68,7 @@ jobs:
               messages: [{
                 role: "user",
                 content: (
-                  "You are writing GitHub release notes for **binance-ticker** — a terminal-based Binance futures/spot price ticker written in Go.\n\n"
+                  "You are writing GitHub release notes for **crypto-ticker** — a terminal-based Binance futures/spot price ticker written in Go.\n\n"
                   + "Version: " + $tag + "\n\n"
                   + "Raw commits since last release:\n" + $commits + "\n\n"
                   + "Instructions:\n"
@@ -122,52 +122,52 @@ jobs:
           BASE_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}"
 
           # Render new formula content
-          cat > "$RUNNER_TEMP/binance-ticker.rb" << FORMULA
-          class BinanceTicker < Formula
-            desc "Terminal-based Binance futures/spot price ticker with real-time WebSocket updates"
+          cat > "$RUNNER_TEMP/crypto-ticker.rb" << FORMULA
+          class CryptoTicker < Formula
+            desc "Terminal-based crypto futures/spot price ticker supporting Binance and Gate.io"
             homepage "https://github.com/${{ github.repository }}"
             license "MIT"
             version "${VERSION}"
 
             on_macos do
               if Hardware::CPU.arm?
-                url "${BASE_URL}/binance-ticker_darwin_arm64.tar.gz"
+                url "${BASE_URL}/crypto-ticker_darwin_arm64.tar.gz"
                 sha256 "${SHA_DARWIN_ARM64}"
               else
-                url "${BASE_URL}/binance-ticker_darwin_amd64.tar.gz"
+                url "${BASE_URL}/crypto-ticker_darwin_amd64.tar.gz"
                 sha256 "${SHA_DARWIN_AMD64}"
               end
             end
 
             on_linux do
               if Hardware::CPU.arm?
-                url "${BASE_URL}/binance-ticker_linux_arm64.tar.gz"
+                url "${BASE_URL}/crypto-ticker_linux_arm64.tar.gz"
                 sha256 "${SHA_LINUX_ARM64}"
               else
-                url "${BASE_URL}/binance-ticker_linux_amd64.tar.gz"
+                url "${BASE_URL}/crypto-ticker_linux_amd64.tar.gz"
                 sha256 "${SHA_LINUX_AMD64}"
               end
             end
 
             def install
-              bin.install "binance-ticker"
-              bin.install_symlink "binance-ticker" => "bt"
+              bin.install "crypto-ticker"
+              bin.install_symlink "crypto-ticker" => "crypto"
             end
 
             test do
-              assert_match "Usage", shell_output("#{bin}/bt --help 2>&1", 1)
+              assert_match "Usage", shell_output("#{bin}/crypto --help 2>&1", 1)
             end
           end
           FORMULA
 
           # Get current file SHA (required by GitHub API to update a file)
-          FILE_SHA=$(gh api repos/byteoxo/homebrew-tap/contents/Formula/binance-ticker.rb \
+          FILE_SHA=$(gh api repos/byteoxo/homebrew-tap/contents/Formula/crypto-ticker.rb \
             --jq '.sha')
 
           # Push updated formula to tap repo
-          gh api repos/byteoxo/homebrew-tap/contents/Formula/binance-ticker.rb \
+          gh api repos/byteoxo/homebrew-tap/contents/Formula/crypto-ticker.rb \
             --method PUT \
-            --field message="Update binance-ticker to ${TAG}" \
-            --field content="$(base64 -w0 < "$RUNNER_TEMP/binance-ticker.rb")" \
+            --field message="Update crypto-ticker to ${TAG}" \
+            --field content="$(base64 -w0 < "$RUNNER_TEMP/crypto-ticker.rb")" \
             --field sha="$FILE_SHA" \
             --jq '.content.html_url'
