@@ -21,7 +21,11 @@ type orderBookResponse struct {
 	Asks         [][]string `json:"asks"`
 }
 
-func fetchOrderBook(ctx context.Context, baseURL, symbol string) (orderBookResponse, error) {
+func fetchOrderBook(ctx context.Context, baseURL, symbol string, panel panelMode) (orderBookResponse, error) {
+	if isGateBaseURL(baseURL) {
+		return fetchOrderBookGate(ctx, baseURL, symbol, panel)
+	}
+
 	parsed, err := url.Parse(baseURL)
 	if err != nil {
 		return orderBookResponse{}, fmt.Errorf("parse base url: %w", err)
@@ -100,7 +104,7 @@ func (ui *uiModel) showOrderBook() {
 	switch panel {
 	case panelSpot:
 		symbol = getChartSymbolForPanel(ui.state, panelSpot)
-		baseURL = defaultSpotRESTBaseURL
+		baseURL = spotRESTBaseURL(ui.cfg)
 	default:
 		symbol = getChartSymbolForPanel(ui.state, panelFutures)
 		baseURL = ui.cfg.RESTBase
@@ -112,13 +116,14 @@ func (ui *uiModel) showOrderBook() {
 
 	ui.orderBookSymbol = symbol
 	ui.orderBookBaseURL = baseURL
+	ui.orderBookPanel = panel
 	ui.orderBookOpen = true
 	ui.pages.ShowPage("orderbook")
 	ui.app.SetFocus(ui.orderBook)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ui.orderBookCancel = cancel
-	go ui.runOrderBookLoop(ctx, baseURL, symbol)
+	go ui.runOrderBookLoop(ctx, baseURL, symbol, panel)
 }
 
 func (ui *uiModel) restartOrderBook() {
@@ -127,7 +132,7 @@ func (ui *uiModel) restartOrderBook() {
 	switch panel {
 	case panelSpot:
 		symbol = getChartSymbolForPanel(ui.state, panelSpot)
-		baseURL = defaultSpotRESTBaseURL
+		baseURL = spotRESTBaseURL(ui.cfg)
 	default:
 		symbol = getChartSymbolForPanel(ui.state, panelFutures)
 		baseURL = ui.cfg.RESTBase
@@ -140,9 +145,10 @@ func (ui *uiModel) restartOrderBook() {
 	}
 	ui.orderBookSymbol = symbol
 	ui.orderBookBaseURL = baseURL
+	ui.orderBookPanel = panel
 	ctx, cancel := context.WithCancel(context.Background())
 	ui.orderBookCancel = cancel
-	go ui.runOrderBookLoop(ctx, baseURL, symbol)
+	go ui.runOrderBookLoop(ctx, baseURL, symbol, panel)
 }
 
 func (ui *uiModel) hideOrderBook() {
@@ -155,8 +161,8 @@ func (ui *uiModel) hideOrderBook() {
 	}
 }
 
-func (ui *uiModel) runOrderBookLoop(ctx context.Context, baseURL, symbol string) {
-	ui.doOrderBookFetch(ctx, baseURL, symbol)
+func (ui *uiModel) runOrderBookLoop(ctx context.Context, baseURL, symbol string, panel panelMode) {
+	ui.doOrderBookFetch(ctx, baseURL, symbol, panel)
 
 	ticker := time.NewTicker(orderBookRefreshInterval)
 	defer ticker.Stop()
@@ -165,13 +171,13 @@ func (ui *uiModel) runOrderBookLoop(ctx context.Context, baseURL, symbol string)
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			ui.doOrderBookFetch(ctx, baseURL, symbol)
+			ui.doOrderBookFetch(ctx, baseURL, symbol, panel)
 		}
 	}
 }
 
-func (ui *uiModel) doOrderBookFetch(ctx context.Context, baseURL, symbol string) {
-	ob, err := fetchOrderBook(ctx, baseURL, symbol)
+func (ui *uiModel) doOrderBookFetch(ctx context.Context, baseURL, symbol string, panel panelMode) {
+	ob, err := fetchOrderBook(ctx, baseURL, symbol, panel)
 	if err != nil {
 		if ctx.Err() != nil {
 			return

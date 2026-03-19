@@ -18,6 +18,9 @@ var (
 )
 
 func runWSLoop(ctx context.Context, cfg config, state *appState, notify func(), getChartSymbol func() string, getChartInterval func() string, getTickerSymbols func() []string, isSpotChartSymbol func(string) bool) error {
+	if cfg.isGate() {
+		return runGateWSLoop(ctx, cfg, state, notify, getChartSymbol, getChartInterval, getTickerSymbols, isSpotChartSymbol)
+	}
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -140,7 +143,10 @@ func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), 
 	}
 }
 
-func runSpotWSLoop(ctx context.Context, cfg config, state *appState, notify func(), getSpotTickerSymbols func() []string) error {
+func runSpotWSLoop(ctx context.Context, cfg config, state *appState, notify func(), getSpotTickerSymbols func() []string, wsBase string) error {
+	if cfg.isGate() {
+		return runGateSpotWSLoop(ctx, cfg, state, notify, getSpotTickerSymbols, wsBase)
+	}
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -149,7 +155,7 @@ func runSpotWSLoop(ctx context.Context, cfg config, state *appState, notify func
 		state.setSpotError("connecting spot websocket...")
 		notify()
 
-		err := consumeSpotWS(ctx, cfg, state, notify, getSpotTickerSymbols, getChartSymbolForActivePanel(state), state.getChartInterval, isSpotTickerSymbolFunc(cfg))
+		err := consumeSpotWS(ctx, cfg, state, notify, getSpotTickerSymbols, getChartSymbolForActivePanel(state), state.getChartInterval, isSpotTickerSymbolFunc(cfg), wsBase)
 		if err == nil || ctx.Err() != nil {
 			return nil
 		}
@@ -168,13 +174,13 @@ func runSpotWSLoop(ctx context.Context, cfg config, state *appState, notify func
 	}
 }
 
-func consumeSpotWS(ctx context.Context, cfg config, state *appState, notify func(), getSpotTickerSymbols func() []string, getChartSymbol func() string, getChartInterval func() string, isSpotChartSymbol func(string) bool) error {
+func consumeSpotWS(ctx context.Context, cfg config, state *appState, notify func(), getSpotTickerSymbols func() []string, getChartSymbol func() string, getChartInterval func() string, isSpotChartSymbol func(string) bool, wsBase string) error {
 	chartSymbol := getChartSymbol()
 	if !isSpotChartSymbol(chartSymbol) {
 		chartSymbol = ""
 	}
 	chartInterval := getChartInterval()
-	endpoint := buildWSURL(defaultSpotWSBaseURL, getSpotTickerSymbols(), chartSymbol, chartInterval)
+	endpoint := buildWSURL(wsBase, getSpotTickerSymbols(), chartSymbol, chartInterval)
 	dialer := websocket.Dialer{HandshakeTimeout: cfg.Timeout}
 	conn, _, err := dialer.DialContext(ctx, endpoint, nil)
 	if err != nil {

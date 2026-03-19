@@ -421,7 +421,7 @@ func parseSpotBalance(item spotBalancePayload, allowed map[string]struct{}) (spo
 
 func loadChartHistoryForSymbol(ctx context.Context, client *http.Client, baseURL string, panel panelMode, symbol string, limit int, state *appState) error {
 	interval := state.getChartInterval()
-	klines, err := fetchKlines(ctx, client, baseURL, symbol, interval, limit)
+	klines, err := fetchKlines(ctx, client, baseURL, symbol, interval, limit, panel)
 	if err != nil {
 		return err
 	}
@@ -429,7 +429,12 @@ func loadChartHistoryForSymbol(ctx context.Context, client *http.Client, baseURL
 	return nil
 }
 
-func fetchKlines(ctx context.Context, client *http.Client, baseURL, symbol, interval string, limit int) ([]klineCandle, error) {
+func fetchKlines(ctx context.Context, client *http.Client, baseURL, symbol, interval string, limit int, panel panelMode) ([]klineCandle, error) {
+	// Route to Gate.io if the base URL is a Gate.io endpoint.
+	if isGateBaseURL(baseURL) {
+		return fetchKlinesGate(ctx, client, baseURL, symbol, interval, limit, panel)
+	}
+
 	endpoint, err := buildKlineURL(baseURL, symbol, interval, limit)
 	if err != nil {
 		return nil, err
@@ -465,6 +470,10 @@ func fetchKlines(ctx context.Context, client *http.Client, baseURL, symbol, inte
 	}
 
 	return klines, nil
+}
+
+func isGateBaseURL(baseURL string) bool {
+	return strings.Contains(baseURL, "gateio.ws") || strings.Contains(baseURL, "gateio.co")
 }
 
 func buildKlineURL(baseURL, symbol, interval string, limit int) (string, error) {

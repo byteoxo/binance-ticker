@@ -34,6 +34,7 @@ type uiModel struct {
 	orderBookCancel  context.CancelFunc
 	orderBookSymbol  string
 	orderBookBaseURL string
+	orderBookPanel   panelMode
 }
 
 func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int), changeInterval func()) *uiModel {
@@ -189,7 +190,7 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 				ui.hideOrderBook()
 				return nil
 			case 'r', 'R':
-				go ui.doOrderBookFetch(context.Background(), ui.orderBookBaseURL, ui.orderBookSymbol)
+				go ui.doOrderBookFetch(context.Background(), ui.orderBookBaseURL, ui.orderBookSymbol, ui.orderBookPanel)
 				return nil
 			}
 			return nil
