@@ -13,11 +13,16 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha512"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -435,4 +440,147 @@ func fetchGateMarketStats(ctx context.Context, client *http.Client, baseURL, sym
 	}
 
 	return oiData, lsData, nil
+}
+
+// ── Gate.io Positions polling loop ───────────────────────────────────────────
+
+func runGatePositionsLoop(ctx context.Context, client *http.Client, cfg config, state *appState, notify func()) {
+	const interval = 5 * time.Second
+	fetch := func() {
+		positions, err := fetchGatePositions(ctx, client, cfg)
+		if err != nil {
+			state.setAccountError(fmt.Sprintf("gate positions: %v", err))
+			notify()
+			return
+		}
+		state.setPositions(positions)
+		state.clearAccountError()
+		notify()
+	}
+	fetch()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			fetch()
+		}
+	}
+}
+
+// ── Gate.io Positions (signed) ────────────────────────────────────────────────
+//
+// Gate.io uses HMAC-SHA512 with a different signing scheme than Binance.
+// Signature = HMAC-SHA512(key=APISecret, message=method+"\n"+path+"\n"+query+"\n"+bodyHash+"\n"+timestamp)
+// Header: KEY, SIGN, Timestamp
+
+// buildGateSignature computes the Gate.io API v4 request signature.
+// Signature = HexEncode(HMAC-SHA512(secret, method+"\n"+path+"\n"+query+"\n"+sha512(body)+"\n"+timestamp))
+func buildGateSignature(secret, method, path, query, body string, ts int64) string {
+	bodyHashBytes := sha512.Sum512([]byte(body))
+	bodyHash := hex.EncodeToString(bodyHashBytes[:])
+	message := strings.Join([]string{method, path, query, bodyHash, strconv.FormatInt(ts, 10)}, "\n")
+	mac := hmac.New(sha512.New, []byte(secret))
+	mac.Write([]byte(message))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func fetchGatePositions(ctx context.Context, client *http.Client, cfg config) ([]positionState, error) {
+	const path = "/api/v4/futures/usdt/positions"
+	ts := time.Now().Unix()
+	sig := buildGateSignature(cfg.APISecret, "GET", path, "", "", ts)
+
+	parsed, err := url.Parse(cfg.RESTBase)
+	if err != nil {
+		return nil, fmt.Errorf("parse gate rest base: %w", err)
+	}
+	parsed.Path = path
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build gate positions request: %w", err)
+	}
+	req.Header.Set("KEY", cfg.APIKey)
+	req.Header.Set("SIGN", sig)
+	req.Header.Set("Timestamp", strconv.FormatInt(ts, 10))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("gate positions request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read gate positions response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gate positions status %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var payload []struct {
+		Contract           string `json:"contract"`
+		Size               int64  `json:"size"` // positive = long, negative = short
+		EntryPrice         string `json:"entry_price"`
+		MarkPrice          string `json:"mark_price"`
+		UnrealisedPnl      string `json:"unrealised_pnl"`
+		LiqPrice           string `json:"liq_price"`
+		Leverage           string `json:"leverage"`
+		CrossLeverageLimit string `json:"cross_leverage_limit"`
+		Mode               string `json:"mode"` // "single" or "dual_long"/"dual_short"
+		UpdateTime         int64  `json:"update_time"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode gate positions: %w", err)
+	}
+
+	positions := make([]positionState, 0)
+	for _, item := range payload {
+		if item.Size == 0 {
+			continue
+		}
+		size := math.Abs(float64(item.Size))
+		entryPrice, _ := strconv.ParseFloat(item.EntryPrice, 64)
+		markPrice, _ := strconv.ParseFloat(item.MarkPrice, 64)
+		unrealPnl, _ := strconv.ParseFloat(item.UnrealisedPnl, 64)
+		liqPrice, _ := strconv.ParseFloat(item.LiqPrice, 64)
+
+		side := "LONG"
+		if item.Size < 0 {
+			side = "SHORT"
+		}
+
+		marginType := "CROSS"
+		lev := item.Leverage
+		if item.Leverage != "0" && item.Leverage != "" {
+			marginType = "ISOLATED"
+		} else {
+			lev = item.CrossLeverageLimit
+		}
+
+		positions = append(positions, positionState{
+			Symbol:           item.Contract,
+			Side:             side,
+			Size:             size,
+			EntryPrice:       entryPrice,
+			MarkPrice:        markPrice,
+			UnrealizedPnL:    unrealPnl,
+			LiquidationPrice: liqPrice,
+			MarginType:       marginType,
+			Leverage:         lev,
+			UpdateTime:       item.UpdateTime * 1000,
+		})
+	}
+
+	sort.Slice(positions, func(i, j int) bool {
+		if positions[i].Symbol == positions[j].Symbol {
+			return positions[i].Side < positions[j].Side
+		}
+		return positions[i].Symbol < positions[j].Symbol
+	})
+	return positions, nil
 }

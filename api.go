@@ -208,7 +208,13 @@ func loadChartHistory(ctx context.Context, client *http.Client, cfg config, stat
 }
 
 func loadInitialPositions(ctx context.Context, client *http.Client, cfg config, state *appState) error {
-	positions, err := fetchPositions(ctx, client, cfg)
+	var positions []positionState
+	var err error
+	if cfg.isGate() {
+		positions, err = fetchGatePositions(ctx, client, cfg)
+	} else {
+		positions, err = fetchPositions(ctx, client, cfg)
+	}
 	if err != nil {
 		return err
 	}
