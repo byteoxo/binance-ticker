@@ -1,16 +1,16 @@
-# Binance Ticker
+# Crypto Ticker
 
 [中文文档](./README.zh-CN.md)
 
-`binance-ticker` is a terminal-based Binance market viewer written in Go. It focuses on realtime futures and spot monitoring with live candlestick charts, rendered with a `tview/tcell` TUI.
+`crypto-ticker` is a terminal-based crypto market viewer written in Go. It supports realtime futures and spot monitoring with live candlestick charts, rendered with a `tview/tcell` TUI. Both **Binance** and **Gate.io** are supported.
 
 ## Preview
 
-<img src="./assets/screenhot.png" alt="Binance Ticker Screenshot" width="760">
+<img src="./assets/screenhot.png" alt="Crypto Ticker Screenshot" width="760">
 
 ## Features
 
-- Realtime Binance USD-M futures and spot quotes over WebSocket streams
+- Realtime quotes over WebSocket — supports **Binance** and **Gate.io** (futures + spot)
 - Live candlestick charts (1h / 2h / 4h / 1d / 3d) with keyboard symbol and interval switching
 - Volume bars, EMA20/50, RSI14, Bollinger Bands, and MACD shown below each chart
 - 24h price change %, Open Interest (with ▲/▼ change), Long/Short Ratio, and Funding Rate per symbol
@@ -40,26 +40,20 @@
 
 ```bash
 brew tap byteoxo/tap
-brew install binance-ticker
-```
-
-After installation, both `bt` and `binance-ticker` are available:
-
-```bash
-bt
+brew install crypto-ticker
 ```
 
 ### Pre-built binaries
 
-Download the latest release for your platform from the [Releases](https://github.com/byteoxo/binance-ticker/releases) page.
+Download the latest release for your platform from the [Releases](https://github.com/byteoxo/crypto-ticker/releases) page.
 
 ### Build from source
 
 ```bash
-git clone https://github.com/byteoxo/binance-ticker.git
-cd binance-ticker
-go build -o binance-ticker .
-./binance-ticker
+git clone https://github.com/byteoxo/crypto-ticker.git
+cd crypto-ticker
+go build -o crypto-ticker .
+./crypto-ticker
 ```
 
 ## Configuration
@@ -69,56 +63,87 @@ The application reads config files only. It does not accept runtime CLI flags.
 It looks for config files in this order:
 
 1. `./config.toml`
-2. `~/.config/binance-ticker/config.toml`
+2. `~/.config/crypto-ticker/config.toml`
 
 If no config file is found, or any required field is missing, the program exits with an error.
 
-An example config is included here: [config.example.toml](./config.example.toml)
+Example configs are included:
+- Binance: [config.example.toml](./config.example.toml)
+- Gate.io: [config.gate.example.toml](./config.gate.example.toml)
 
 ## Config Fields
 
 | Field | Description |
 |-------|-------------|
-| `symbols` | Futures symbols to subscribe to, e.g. `["ETHUSDT", "BTCUSDT"]` |
-| `spot_symbols` | Spot assets to display, e.g. `["ZKC", "BARD"]` |
+| `exchange` | `binance` (default) or `gate` |
+| `symbols` | Futures symbols to subscribe to, e.g. `["ETHUSDT", "BTCUSDT"]` (Binance) or `["BTC_USDT", "ETH_USDT"]` (Gate.io) |
+| `spot_symbols` | Spot assets to display |
 | `chart_symbol` | Default futures chart symbol on startup |
 | `chart_limit` | Number of candles to render |
 | `default_panel` | `futures` or `spot` |
 | `timeout` | HTTP/WebSocket timeout, e.g. `8s` |
 | `retry_delay` | Reconnect delay after WebSocket disconnect, e.g. `2s` |
 | `tz` | Display timezone, e.g. `Asia/Shanghai` |
-| `rest_base` | Binance REST API base URL |
-| `ws_base` | Binance WebSocket base URL |
+| `rest_base` | *(Optional)* REST API base URL — defaults to exchange default |
+| `ws_base` | *(Optional)* WebSocket base URL — defaults to exchange default |
 | `no_color` | Disable TUI colors |
-| `api_key` | *(Optional)* Binance API key — enables account features |
-| `api_secret` | *(Optional)* Binance API secret — required with `api_key` |
+| `api_key` | *(Optional)* API key — enables account features |
+| `api_secret` | *(Optional)* API secret — required with `api_key` |
+
+## Exchange Support
+
+### Binance (default)
+
+```toml
+exchange = "binance"
+symbols  = ["ETHUSDT", "BTCUSDT", "SOLUSDT"]
+```
+
+Defaults applied automatically:
+- REST: `https://fapi.binance.com`
+- WS: `wss://fstream.binance.com`
+
+### Gate.io
+
+Gate.io uses underscore-separated symbol names (`BTC_USDT` instead of `BTCUSDT`).
+
+```toml
+exchange = "gate"
+symbols  = ["BTC_USDT", "ETH_USDT", "SOL_USDT"]
+```
+
+Defaults applied automatically:
+- Futures REST: `https://fx-api.gateio.ws`
+- Futures WS: `wss://fx-ws.gateio.ws/v4/ws/usdt`
+- Spot REST: `https://api.gateio.ws`
+- Spot WS: `wss://api.gateio.ws/ws/v4/`
 
 ## API Key Setup (Optional)
 
 An API key is **not required** to view market data. It is only needed to display your **futures positions** and **spot balances**.
 
-### Step 1 — Create an API key on Binance
+### Setting keys via environment variables (recommended)
 
-1. Log in to [binance.com](https://www.binance.com) and click your profile icon → **Account**.
-2. Go to **API Management** → **Create API**.
-3. Choose **System-generated** (HMAC) for simplicity. You will receive an **API Key** and a **Secret Key** — save the Secret Key immediately, it is shown only once.
+Environment variables take precedence over config file values.
 
-> Full walkthrough: [How to Create API Keys on Binance](https://www.binance.com/en/support/faq/how-to-create-api-keys-on-binance-360002502072)
+| Exchange | Key variable | Secret variable |
+|----------|-------------|----------------|
+| Binance | `BINANCE_API_KEY` | `BINANCE_API_SECRET` |
+| Gate.io | `GATE_API_KEY` | `GATE_API_SECRET` |
 
-### Step 2 — Set permissions
+```bash
+export BINANCE_API_KEY=your_key
+export BINANCE_API_SECRET=your_secret
+```
 
-This tool is **read-only**. When configuring your key:
+or for Gate.io:
 
-- ✅ Enable **Read Info** (required)
-- ❌ Do **not** enable trading, withdrawal, or transfer permissions
+```bash
+export GATE_API_KEY=your_key
+export GATE_API_SECRET=your_secret
+```
 
-### Step 3 — Restrict by IP (recommended)
-
-Binance strongly recommends adding IP restrictions to your API key. If your IP is unrestricted, the key can only have **Read** permission (which is all this tool needs).
-
-> Security note from Binance: Binance strongly recommends against enabling permissions beyond reading without defining IP access restrictions.
-
-### Step 4 — Add to config
+### Setting keys via config file
 
 ```toml
 api_key    = "your_api_key_here"
@@ -127,15 +152,18 @@ api_secret = "your_api_secret_here"
 
 > ⚠️ Keep your `config.toml` private. Never commit it to a public repository.
 
-### Binance API documentation
+### Binance — creating an API key
 
-- [How to Create API Keys on Binance](https://www.binance.com/en/support/faq/how-to-create-api-keys-on-binance-360002502072)
-- [API Key Types (HMAC / Ed25519 / RSA)](https://developers.binance.com/docs/binance-spot-api-docs/faqs/api_key_types)
-- [How to Generate an Ed25519 Key Pair](https://www.binance.com/en/support/faq/how-to-generate-an-ed25519-key-pair-to-send-api-requests-on-binance-6b9a63f1e3384cf48a2eedb82767a69a)
+1. Log in to [binance.com](https://www.binance.com) and go to **API Management** → **Create API**.
+2. Choose **System-generated** (HMAC). Save the Secret Key immediately — it is shown only once.
+3. Enable **Read Info** only. Do not enable trading or withdrawal permissions.
 
-## Example Config
+> Full walkthrough: [How to Create API Keys on Binance](https://www.binance.com/en/support/faq/how-to-create-api-keys-on-binance-360002502072)
+
+## Example Config (Binance)
 
 ```toml
+exchange      = "binance"
 symbols       = ["ETHUSDT", "BTCUSDT", "SOLUSDT"]
 spot_symbols  = ["ZKC", "BARD"]
 chart_symbol  = "ETHUSDT"
@@ -143,8 +171,23 @@ chart_limit   = 48
 default_panel = "futures"
 timeout       = "8s"
 tz            = "Asia/Shanghai"
-rest_base     = "https://fapi.binance.com"
-ws_base       = "wss://fstream.binance.com"
+no_color      = false
+retry_delay   = "2s"
+api_key       = ""
+api_secret    = ""
+```
+
+## Example Config (Gate.io)
+
+```toml
+exchange      = "gate"
+symbols       = ["BTC_USDT", "ETH_USDT", "SOL_USDT"]
+spot_symbols  = ["BTC_USDT", "ETH_USDT"]
+chart_symbol  = "BTC_USDT"
+chart_limit   = 48
+default_panel = "futures"
+timeout       = "8s"
+tz            = "Asia/Shanghai"
 no_color      = false
 retry_delay   = "2s"
 api_key       = ""
