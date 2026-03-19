@@ -92,7 +92,7 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 			state.setError(fmt.Sprintf("chart init failed: %v", err))
 		}
 	}
-	if cfg.hasAccountAuth() && len(cfg.Symbols) > 0 && !cfg.isGate() {
+	if cfg.hasAccountAuth() && len(cfg.Symbols) > 0 {
 		if err := loadInitialPositions(ctx, client, cfg, state); err != nil {
 			state.setAccountError(fmt.Sprintf("positions init failed: %v", err))
 		}
@@ -257,8 +257,12 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 			go runMarketStatsLoop(ctx, client, cfg, state, ui.requestDraw)
 		}
 	}
-	if cfg.hasAccountAuth() && len(cfg.Symbols) > 0 && !cfg.isGate() {
-		go runUserDataLoop(ctx, client, cfg, state, ui.requestDraw)
+	if cfg.hasAccountAuth() && len(cfg.Symbols) > 0 {
+		if cfg.isGate() {
+			go runGatePositionsLoop(ctx, client, cfg, state, ui.requestDraw)
+		} else {
+			go runUserDataLoop(ctx, client, cfg, state, ui.requestDraw)
+		}
 	}
 	if cfg.hasAccountAuth() && cfg.hasSpot() && !cfg.isGate() {
 		go runSpotUserDataLoop(ctx, client, cfg, state, ui.requestDraw)
