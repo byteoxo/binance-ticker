@@ -12,16 +12,27 @@ import (
 )
 
 const (
-	defaultWSBaseURL          = "wss://fstream.binance.com"
-	defaultRESTBaseURL        = "https://fapi.binance.com"
-	defaultSpotWSBaseURL      = "wss://stream.binance.com:9443"
-	defaultSpotRESTBaseURL    = "https://api.binance.com"
-	futuresKlinePath          = "/fapi/v1/klines"
-	spotKlinePath             = "/api/v3/klines"
-	positionRiskPath          = "/fapi/v3/positionRisk"
-	listenKeyPath             = "/fapi/v1/listenKey"
-	spotAccountPath           = "/api/v3/account"
-	defaultSpotWSAPIBaseURL   = "wss://ws-api.binance.com:443/ws-api/v3"
+	// Binance Futures
+	defaultWSBaseURL        = "wss://fstream.binance.com"
+	defaultRESTBaseURL      = "https://fapi.binance.com"
+	futuresKlinePath        = "/fapi/v1/klines"
+	positionRiskPath        = "/fapi/v3/positionRisk"
+	listenKeyPath           = "/fapi/v1/listenKey"
+	futuresDepthPath        = "/fapi/v1/depth"
+	// Binance Spot
+	defaultSpotWSBaseURL    = "wss://stream.binance.com:9443"
+	defaultSpotRESTBaseURL  = "https://api.binance.com"
+	spotKlinePath           = "/api/v3/klines"
+	spotAccountPath         = "/api/v3/account"
+	defaultSpotWSAPIBaseURL = "wss://ws-api.binance.com:443/ws-api/v3"
+	spotDepthPath           = "/api/v3/depth"
+	// Gate.io Futures
+	defaultGateWSBaseURL      = "wss://fx-ws.gateio.ws/v4/ws/usdt"
+	defaultGateRESTBaseURL    = "https://fx-api.gateio.ws"
+	// Gate.io Spot
+	defaultGateSpotWSBaseURL  = "wss://api.gateio.ws/ws/v4/"
+	defaultGateSpotRESTBaseURL = "https://api.gateio.ws"
+
 	defaultTimeout            = 8 * time.Second
 	userDataKeepaliveInterval = 50 * time.Minute
 	uiRefreshInterval         = time.Second
@@ -33,18 +44,30 @@ const (
 	bullColorTag              = "#00c853"
 	bearColorTag              = "#e53935"
 	neutralColorTag           = "#9aa0a6"
-	futuresDepthPath          = "/fapi/v1/depth"
-	spotDepthPath             = "/api/v3/depth"
 	orderBookLimit            = 20
 	orderBookRefreshInterval  = time.Second
-	defaultChartInterval        = "1h"
-	sparklineHistory            = 20
-	fundingRateRefreshInterval  = 60 * time.Second
-	marketStatsRefreshInterval  = 30 * time.Second
-	defaultVolumeHeight         = 4
+	defaultChartInterval      = "1h"
+	sparklineHistory          = 20
+	fundingRateRefreshInterval = 60 * time.Second
+	marketStatsRefreshInterval = 30 * time.Second
+	defaultVolumeHeight       = 4
 )
 
 var chartIntervals = []string{"1h", "2h", "4h", "1d", "3d"}
+
+func spotRESTBaseURL(cfg config) string {
+	if cfg.isGate() {
+		return defaultGateSpotRESTBaseURL
+	}
+	return defaultSpotRESTBaseURL
+}
+
+func spotWSBaseURL(cfg config) string {
+	if cfg.isGate() {
+		return defaultGateSpotWSBaseURL
+	}
+	return defaultSpotWSBaseURL
+}
 
 func main() {
 	log.SetFlags(0)
@@ -69,11 +92,15 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 			state.setError(fmt.Sprintf("chart init failed: %v", err))
 		}
 	}
-	if cfg.hasAccountAuth() && len(cfg.Symbols) > 0 {
+	if cfg.hasAccountAuth() && len(cfg.Symbols) > 0 && !cfg.isGate() {
 		if err := loadInitialPositions(ctx, client, cfg, state); err != nil {
 			state.setAccountError(fmt.Sprintf("positions init failed: %v", err))
 		}
 	}
+	spotRESTBase := spotRESTBaseURL(cfg)
+	spotWSBase := spotWSBaseURL(cfg)
+	_ = spotWSBase
+
 	if cfg.hasSpot() {
 		state.setSpotRows(spotSymbolsToTickers(cfg.SpotSymbols))
 		if err := loadInitialSpotBalances(ctx, client, cfg, state); err != nil {
@@ -82,7 +109,7 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 		if len(cfg.SpotSymbols) > 0 {
 			spotTickers := spotSymbolsToTickers(cfg.SpotSymbols)
 			if len(spotTickers) > 0 && (cfg.DefaultPanel == string(panelSpot) || len(cfg.Symbols) == 0) {
-				if err := loadChartHistoryForSymbol(ctx, client, defaultSpotRESTBaseURL, panelSpot, spotTickers[0], cfg.ChartLimit, state); err != nil {
+				if err := loadChartHistoryForSymbol(ctx, client, spotRESTBase, panelSpot, spotTickers[0], cfg.ChartLimit, state); err != nil {
 					state.setSpotError(fmt.Sprintf("spot chart init failed: %v", err))
 				}
 			}
@@ -137,7 +164,7 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 		switch panel {
 		case panelSpot:
 			if sym := getChartSymbolForPanel(state, panelSpot); sym != "" {
-				if err := loadChartHistoryForSymbol(ctx, client, defaultSpotRESTBaseURL, panelSpot, sym, cfg.ChartLimit, state); err != nil {
+				if err := loadChartHistoryForSymbol(ctx, client, spotRESTBase, panelSpot, sym, cfg.ChartLimit, state); err != nil {
 					state.setSpotError(fmt.Sprintf("chart interval switch failed: %v", err))
 				}
 			}
@@ -163,7 +190,7 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 		switch panel {
 		case panelSpot:
 			symbols = spotSymbolsToTickers(cfg.SpotSymbols)
-			baseURL = defaultSpotRESTBaseURL
+			baseURL = spotRESTBase
 			waitingMessage = "Spot panel is not configured"
 			switchMessage = "switching spot chart to %s..."
 			clearErr = state.clearSpotError
@@ -222,18 +249,23 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 	}()
 
 	if len(cfg.Symbols) > 0 {
-		go runFundingRateLoop(ctx, client, cfg, state, ui.requestDraw)
-		go runMarketStatsLoop(ctx, client, cfg, state, ui.requestDraw)
+		if cfg.isGate() {
+			go runGateFundingRateLoop(ctx, client, cfg, state, ui.requestDraw)
+			go runGateMarketStatsLoop(ctx, client, cfg, state, ui.requestDraw)
+		} else {
+			go runFundingRateLoop(ctx, client, cfg, state, ui.requestDraw)
+			go runMarketStatsLoop(ctx, client, cfg, state, ui.requestDraw)
+		}
 	}
-	if cfg.hasAccountAuth() && len(cfg.Symbols) > 0 {
+	if cfg.hasAccountAuth() && len(cfg.Symbols) > 0 && !cfg.isGate() {
 		go runUserDataLoop(ctx, client, cfg, state, ui.requestDraw)
 	}
-	if cfg.hasAccountAuth() && cfg.hasSpot() {
+	if cfg.hasAccountAuth() && cfg.hasSpot() && !cfg.isGate() {
 		go runSpotUserDataLoop(ctx, client, cfg, state, ui.requestDraw)
 	}
 	if cfg.hasSpot() {
 		go func() {
-			err := runSpotWSLoop(ctx, cfg, state, ui.requestDraw, getSpotTickerSymbols)
+			err := runSpotWSLoop(ctx, cfg, state, ui.requestDraw, getSpotTickerSymbols, spotWSBase)
 			if err != nil {
 				select {
 				case errCh <- err:
