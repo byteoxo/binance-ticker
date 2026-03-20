@@ -35,6 +35,11 @@ type uiModel struct {
 	orderBookSymbol  string
 	orderBookBaseURL string
 	orderBookPanel   panelMode
+	openOrders       tview.Primitive
+	openOrdersFrame  *tview.Frame
+	openOrdersTable  *tview.Table
+	openOrdersOpen   bool
+	openOrdersCancel context.CancelFunc
 }
 
 func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int), changeInterval func()) *uiModel {
@@ -71,6 +76,7 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 		{"Down / Right", "Next chart symbol"},
 		{"i", "Cycle chart interval (1h→2h→4h→1d→3d)"},
 		{"o", "Open order book for current symbol"},
+		{"u", "Open open orders panel (requires API key)"},
 		{"q", "Quit"},
 		{"Ctrl+C", "Quit"},
 		{"Esc", "Close help / modal / order book"},
@@ -122,16 +128,18 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 	positions.SetBorder(true).SetTitle("Positions")
 	chart.SetBorder(true).SetTitle("1H Chart")
 	footer.SetBorder(true)
-	footer.SetText("/ or h help | Tab switch panel | Arrows switch chart | i interval | o order book | q / Ctrl+C quit")
+	footer.SetText("/ or h help | Tab switch panel | Arrows switch chart | i interval | o order book | u open orders | q / Ctrl+C quit")
 
 	ob, obFrame, obTable := buildOrderBookUI()
+	oo, ooFrame, ooTable := buildOpenOrdersUI()
 
-	ui := &uiModel{app: app, header: header, status: status, table: table, positions: positions, chart: chart, footer: footer, help: help, cfg: cfg, loc: loc, state: state, changeChart: changeChart, changeInterval: changeInterval, orderBook: ob, orderBookFrame: obFrame, orderBookTable: obTable}
+	ui := &uiModel{app: app, header: header, status: status, table: table, positions: positions, chart: chart, footer: footer, help: help, cfg: cfg, loc: loc, state: state, changeChart: changeChart, changeInterval: changeInterval, orderBook: ob, orderBookFrame: obFrame, orderBookTable: obTable, openOrders: oo, openOrdersFrame: ooFrame, openOrdersTable: ooTable}
 	ui.refresh()
 	ui.pages = tview.NewPages().
 		AddPage("main", ui.layout(), true, true).
 		AddPage("help", help, true, false).
-		AddPage("orderbook", ob, true, false)
+		AddPage("orderbook", ob, true, false).
+		AddPage("openorders", oo, true, false)
 
 	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, modalMessage := ui.state.snapshot()
@@ -195,6 +203,22 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 			}
 			return nil
 		}
+		if ui.openOrdersOpen {
+			switch event.Key() {
+			case tcell.KeyEsc:
+				ui.hideOpenOrders()
+				return nil
+			}
+			switch event.Rune() {
+			case 'u', 'U':
+				ui.hideOpenOrders()
+				return nil
+			case 'r', 'R':
+				go ui.doOpenOrdersFetch(context.Background())
+				return nil
+			}
+			return nil
+		}
 
 		switch event.Key() {
 		case tcell.KeyCtrlC:
@@ -228,6 +252,9 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 			return nil
 		case 'o', 'O':
 			ui.showOrderBook()
+			return nil
+		case 'u', 'U':
+			ui.showOpenOrders()
 			return nil
 		case 'q', 'Q':
 			app.Stop()
