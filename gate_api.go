@@ -573,6 +573,7 @@ func fetchGatePositions(ctx context.Context, client *http.Client, cfg config) ([
 			MarginType:       marginType,
 			Leverage:         lev,
 			UpdateTime:       item.UpdateTime * 1000,
+			PnLFromAPI:       true,
 		})
 	}
 
