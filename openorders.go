@@ -1,0 +1,458 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
+)
+
+// openOrder represents a single open (unfilled) order.
+type openOrder struct {
+	Symbol    string
+	OrderID   int64
+	Side      string // BUY / SELL / buy / sell
+	Type      string // LIMIT, MARKET, etc.
+	Price     float64
+	OrigQty   float64
+	FilledQty float64
+	Status    string
+	TimeInForce string
+	Time      int64
+}
+
+// ── Binance Futures open orders ───────────────────────────────────────────────
+
+func fetchBinanceFuturesOpenOrders(ctx context.Context, client *http.Client, cfg config) ([]openOrder, error) {
+	query := url.Values{}
+	query.Set("timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	query.Set("recvWindow", strconv.FormatInt(int64(cfg.Timeout/time.Millisecond), 10))
+
+	endpoint, err := buildSignedURL(cfg.RESTBase, "/fapi/v1/openOrders", query, cfg.APISecret)
+	if err != nil {
+		return nil, fmt.Errorf("build binance futures open orders url: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build binance futures open orders request: %w", err)
+	}
+	req.Header.Set("X-MBX-APIKEY", cfg.APIKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send binance futures open orders request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read binance futures open orders response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("binance futures open orders status %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var payload []struct {
+		Symbol      string `json:"symbol"`
+		OrderID     int64  `json:"orderId"`
+		Side        string `json:"side"`
+		Type        string `json:"type"`
+		Price       string `json:"price"`
+		OrigQty     string `json:"origQty"`
+		ExecutedQty string `json:"executedQty"`
+		Status      string `json:"status"`
+		TimeInForce string `json:"timeInForce"`
+		Time        int64  `json:"time"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode binance futures open orders: %w", err)
+	}
+
+	orders := make([]openOrder, 0, len(payload))
+	for _, item := range payload {
+		price, _ := strconv.ParseFloat(item.Price, 64)
+		origQty, _ := strconv.ParseFloat(item.OrigQty, 64)
+		filledQty, _ := strconv.ParseFloat(item.ExecutedQty, 64)
+		orders = append(orders, openOrder{
+			Symbol:      item.Symbol,
+			OrderID:     item.OrderID,
+			Side:        item.Side,
+			Type:        item.Type,
+			Price:       price,
+			OrigQty:     origQty,
+			FilledQty:   filledQty,
+			Status:      item.Status,
+			TimeInForce: item.TimeInForce,
+			Time:        item.Time,
+		})
+	}
+	return orders, nil
+}
+
+// ── Binance Spot open orders ──────────────────────────────────────────────────
+
+func fetchBinanceSpotOpenOrders(ctx context.Context, client *http.Client, cfg config) ([]openOrder, error) {
+	query := url.Values{}
+	query.Set("timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	query.Set("recvWindow", strconv.FormatInt(int64(cfg.Timeout/time.Millisecond), 10))
+
+	endpoint, err := buildSignedURL(defaultSpotRESTBaseURL, "/api/v3/openOrders", query, cfg.APISecret)
+	if err != nil {
+		return nil, fmt.Errorf("build binance spot open orders url: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build binance spot open orders request: %w", err)
+	}
+	req.Header.Set("X-MBX-APIKEY", cfg.APIKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send binance spot open orders request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read binance spot open orders response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("binance spot open orders status %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var payload []struct {
+		Symbol      string `json:"symbol"`
+		OrderID     int64  `json:"orderId"`
+		Side        string `json:"side"`
+		Type        string `json:"type"`
+		Price       string `json:"price"`
+		OrigQty     string `json:"origQty"`
+		ExecutedQty string `json:"executedQty"`
+		Status      string `json:"status"`
+		TimeInForce string `json:"timeInForce"`
+		Time        int64  `json:"time"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode binance spot open orders: %w", err)
+	}
+
+	orders := make([]openOrder, 0, len(payload))
+	for _, item := range payload {
+		price, _ := strconv.ParseFloat(item.Price, 64)
+		origQty, _ := strconv.ParseFloat(item.OrigQty, 64)
+		filledQty, _ := strconv.ParseFloat(item.ExecutedQty, 64)
+		orders = append(orders, openOrder{
+			Symbol:      item.Symbol,
+			OrderID:     item.OrderID,
+			Side:        item.Side,
+			Type:        item.Type,
+			Price:       price,
+			OrigQty:     origQty,
+			FilledQty:   filledQty,
+			Status:      item.Status,
+			TimeInForce: item.TimeInForce,
+			Time:        item.Time,
+		})
+	}
+	return orders, nil
+}
+
+// ── Gate.io Futures open orders ───────────────────────────────────────────────
+
+func fetchGateOpenOrders(ctx context.Context, client *http.Client, cfg config) ([]openOrder, error) {
+	const path = "/api/v4/futures/usdt/orders"
+	ts := time.Now().Unix()
+
+	query := url.Values{}
+	query.Set("status", "open")
+	queryStr := query.Encode()
+
+	sig := buildGateSignature(cfg.APISecret, "GET", path, queryStr, "", ts)
+
+	parsed, err := url.Parse(cfg.RESTBase)
+	if err != nil {
+		return nil, fmt.Errorf("parse gate rest base: %w", err)
+	}
+	parsed.Path = path
+	parsed.RawQuery = queryStr
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build gate open orders request: %w", err)
+	}
+	req.Header.Set("KEY", cfg.APIKey)
+	req.Header.Set("SIGN", sig)
+	req.Header.Set("Timestamp", strconv.FormatInt(ts, 10))
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("gate open orders request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read gate open orders response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gate open orders status %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var payload []struct {
+		ID         int64  `json:"id"`
+		Contract   string `json:"contract"`
+		Size       int64  `json:"size"`  // positive=buy, negative=sell
+		Price      string `json:"price"`
+		Left       int64  `json:"left"`  // remaining unfilled size
+		Type       string `json:"type"`  // "limit" or "market"
+		Tif        string `json:"tif"`   // time in force: gtc, ioc, poc, fok
+		Status     string `json:"status"`
+		CreateTime float64 `json:"create_time"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode gate open orders: %w", err)
+	}
+
+	orders := make([]openOrder, 0, len(payload))
+	for _, item := range payload {
+		price, _ := strconv.ParseFloat(item.Price, 64)
+		origQty := float64(item.Size)
+		if origQty < 0 {
+			origQty = -origQty
+		}
+		filled := origQty - float64(item.Left)
+		if filled < 0 {
+			filled = 0
+		}
+		side := "BUY"
+		if item.Size < 0 {
+			side = "SELL"
+		}
+		orders = append(orders, openOrder{
+			Symbol:      item.Contract,
+			OrderID:     item.ID,
+			Side:        side,
+			Type:        strings.ToUpper(item.Type),
+			Price:       price,
+			OrigQty:     origQty,
+			FilledQty:   filled,
+			Status:      strings.ToUpper(item.Status),
+			TimeInForce: strings.ToUpper(item.Tif),
+			Time:        int64(item.CreateTime * 1000),
+		})
+	}
+	return orders, nil
+}
+
+// fetchOpenOrders routes to the correct exchange.
+func fetchOpenOrders(ctx context.Context, client *http.Client, cfg config) (futures []openOrder, spot []openOrder, err error) {
+	if !cfg.hasAccountAuth() {
+		return nil, nil, nil
+	}
+	if cfg.isGate() {
+		f, e := fetchGateOpenOrders(ctx, client, cfg)
+		return f, nil, e
+	}
+	f, e1 := fetchBinanceFuturesOpenOrders(ctx, client, cfg)
+	if e1 != nil {
+		return nil, nil, e1
+	}
+	s, e2 := fetchBinanceSpotOpenOrders(ctx, client, cfg)
+	return f, s, e2
+}
+
+// ── Open Orders UI overlay ────────────────────────────────────────────────────
+
+const openOrdersRefreshInterval = 5 * time.Second
+
+func buildOpenOrdersUI() (tview.Primitive, *tview.Frame, *tview.Table) {
+	ooTable := tview.NewTable().SetBorders(false).SetSelectable(false, false).SetFixed(1, 0)
+	ooTable.SetBackgroundColor(tcell.ColorDefault)
+
+	hint := tview.NewTextView().SetDynamicColors(true)
+	hint.SetBackgroundColor(tcell.ColorDefault)
+	hint.SetText("r refresh  Esc/u close")
+
+	content := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(ooTable, 0, 1, false).
+		AddItem(hint, 1, 0, false)
+
+	frame := tview.NewFrame(content)
+	frame.SetBorders(1, 1, 1, 1, 2, 2)
+	frame.SetBorder(true)
+	frame.SetTitle("Open Orders")
+	frame.SetBackgroundColor(tcell.ColorDefault)
+
+	overlay := tview.NewFlex().
+		AddItem(nil, 0, 1, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
+			AddItem(nil, 0, 1, false).
+			AddItem(frame, 0, 3, false).
+			AddItem(nil, 0, 1, false), 90, 0, true).
+		AddItem(nil, 0, 1, false)
+
+	return overlay, frame, ooTable
+}
+
+func (ui *uiModel) showOpenOrders() {
+	if !ui.cfg.hasAccountAuth() {
+		ui.state.setModal("Account auth not configured (api_key / api_secret missing)")
+		ui.refreshNow()
+		return
+	}
+	ui.openOrdersOpen = true
+	ui.pages.ShowPage("openorders")
+	ui.app.SetFocus(ui.openOrders)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ui.openOrdersCancel = cancel
+	go ui.runOpenOrdersLoop(ctx)
+}
+
+func (ui *uiModel) hideOpenOrders() {
+	ui.openOrdersOpen = false
+	ui.pages.HidePage("openorders")
+	ui.app.SetFocus(ui.chart)
+	if ui.openOrdersCancel != nil {
+		ui.openOrdersCancel()
+		ui.openOrdersCancel = nil
+	}
+}
+
+func (ui *uiModel) runOpenOrdersLoop(ctx context.Context) {
+	ui.doOpenOrdersFetch(ctx)
+
+	ticker := time.NewTicker(openOrdersRefreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ui.doOpenOrdersFetch(ctx)
+		}
+	}
+}
+
+func (ui *uiModel) doOpenOrdersFetch(ctx context.Context) {
+	client := &http.Client{Timeout: ui.cfg.Timeout}
+	futures, spot, err := fetchOpenOrders(ctx, client, ui.cfg)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		ui.app.QueueUpdateDraw(func() {
+			ui.renderOpenOrdersError(err.Error())
+		})
+		return
+	}
+	ui.app.QueueUpdateDraw(func() {
+		ui.renderOpenOrders(futures, spot)
+	})
+}
+
+func (ui *uiModel) renderOpenOrders(futures, spot []openOrder) {
+	ui.openOrdersTable.Clear()
+
+	row := 0
+	headers := []string{"SYMBOL", "SIDE", "TYPE", "PRICE", "QTY", "FILLED", "TIF", "STATUS", "TIME"}
+
+	setHeader := func(text string, col int) {
+		cell := tview.NewTableCell(ui.ooCell("[::b][yellow]", text)).
+			SetSelectable(false).
+			SetBackgroundColor(tcell.ColorDefault).
+			SetExpansion(1)
+		ui.openOrdersTable.SetCell(row, col, cell)
+	}
+
+	setCell := func(text, color string, r, col int) {
+		cell := tview.NewTableCell(ui.ooCell(color, text)).
+			SetSelectable(false).
+			SetBackgroundColor(tcell.ColorDefault).
+			SetExpansion(1)
+		ui.openOrdersTable.SetCell(r, col, cell)
+	}
+
+	renderSection := func(title string, orders []openOrder) {
+		// Section header
+		titleCell := tview.NewTableCell(ui.ooCell("[::b][white]", title)).
+			SetSelectable(false).
+			SetBackgroundColor(tcell.ColorDefault).
+			SetExpansion(len(headers))
+		ui.openOrdersTable.SetCell(row, 0, titleCell)
+		row++
+
+		// Column headers
+		for col, h := range headers {
+			setHeader(h, col)
+		}
+		row++
+
+		if len(orders) == 0 {
+			cell := tview.NewTableCell(ui.ooCell("[gray]", "no open orders")).
+				SetSelectable(false).
+				SetBackgroundColor(tcell.ColorDefault).
+				SetExpansion(len(headers))
+			ui.openOrdersTable.SetCell(row, 0, cell)
+			row++
+			return
+		}
+
+		for _, o := range orders {
+			sideColor := "[green]"
+			if strings.ToUpper(o.Side) == "SELL" {
+				sideColor = "[red]"
+			}
+			priceStr := formatCompactFloat(o.Price)
+			if o.Price == 0 {
+				priceStr = "MARKET"
+			}
+			timeStr := time.Unix(o.Time/1000, 0).Format("01-02 15:04")
+
+			setCell(o.Symbol, "[white]", row, 0)
+			setCell(strings.ToUpper(o.Side), sideColor, row, 1)
+			setCell(strings.ToUpper(o.Type), "[white]", row, 2)
+			setCell(priceStr, "[white]", row, 3)
+			setCell(formatCompactFloat(o.OrigQty), "[white]", row, 4)
+			setCell(formatCompactFloat(o.FilledQty), "[gray]", row, 5)
+			setCell(o.TimeInForce, "[gray]", row, 6)
+			setCell(strings.ToUpper(o.Status), "[white]", row, 7)
+			setCell(timeStr, "[gray]", row, 8)
+			row++
+		}
+	}
+
+	if ui.cfg.isGate() {
+		renderSection("Gate.io Futures", futures)
+	} else {
+		renderSection("Binance Futures", futures)
+		renderSection("Binance Spot", spot)
+	}
+}
+
+func (ui *uiModel) renderOpenOrdersError(msg string) {
+	ui.openOrdersTable.Clear()
+	cell := tview.NewTableCell(ui.ooCell("[red]", "fetch error: "+msg)).
+		SetSelectable(false).
+		SetBackgroundColor(tcell.ColorDefault).
+		SetExpansion(1)
+	ui.openOrdersTable.SetCell(0, 0, cell)
+}
+
+func (ui *uiModel) ooCell(colorTag, text string) string {
+	if ui.cfg.NoColor {
+		return text
+	}
+	return colorTag + escapeTView(text) + "[-]"
+}
