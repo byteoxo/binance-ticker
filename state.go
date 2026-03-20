@@ -83,6 +83,10 @@ type positionState struct {
 	MarginType       string
 	Leverage         string
 	UpdateTime       int64
+	// PnLFromAPI indicates the UnrealizedPnL was provided directly by the
+	// exchange API (e.g. Gate.io) and must not be recalculated locally,
+	// because the exchange uses contract-count sizing rather than asset qty.
+	PnLFromAPI bool
 }
 
 type positionUpdate struct {
@@ -343,6 +347,12 @@ func compareFloat(a, b float64) int {
 }
 
 func calculatePositionPnL(position positionState) float64 {
+	// Gate.io (and any exchange where PnLFromAPI is set) returns the correct
+	// USDT PnL directly from the API. The formula below is only valid for
+	// Binance-style positions where Size is expressed in base-asset units.
+	if position.PnLFromAPI {
+		return position.UnrealizedPnL
+	}
 	if position.MarkPrice == 0 || position.EntryPrice == 0 || position.Size == 0 {
 		return position.UnrealizedPnL
 	}
