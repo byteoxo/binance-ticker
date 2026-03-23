@@ -431,6 +431,10 @@ func (ui *uiModel) showOpenOrders() {
 	if ui.cfg.isGate() {
 		ui.openOrdersTable.SetSelectable(true, false)
 		ui.openOrdersTable.SetFixed(2, 0)
+		ui.openOrdersTable.SetSelectedStyle(tcell.StyleDefault.
+			Foreground(tcell.ColorWhite).
+			Background(tcell.ColorDarkBlue).
+			Attributes(tcell.AttrBold))
 		ui.resetOpenOrdersHint()
 		ui.app.SetFocus(ui.openOrdersTable)
 	} else {
