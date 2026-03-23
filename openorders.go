@@ -649,7 +649,15 @@ func (ui *uiModel) showNewOrderForm() {
 
 	form := tview.NewForm()
 	form.AddInputField("Contract", chartSymbol, 20, nil, nil)
-	form.AddDropDown("Side", []string{"BUY (long)", "SELL (short)"}, 0, nil)
+	dropdownReady := false
+	form.AddDropDown("Side", []string{"BUY (long)", "SELL (short)"}, 0, func(option string, optionIndex int) {
+		if dropdownReady {
+			if p, ok := form.GetFormItem(2).(tview.Primitive); ok {
+				ui.app.SetFocus(p)
+			}
+		}
+	})
+	dropdownReady = true
 	form.GetFormItem(1).(*tview.DropDown).SetListStyles(unselectedStyle, selectedStyle)
 	form.AddInputField("Price", "", 20, func(text string, ch rune) bool {
 		return ch == '.' || (ch >= '0' && ch <= '9')
