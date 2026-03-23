@@ -715,6 +715,41 @@ func cancelGateFuturesOrder(ctx context.Context, client *http.Client, cfg config
 	return nil
 }
 
+// cancelGateFuturesPriceOrder cancels a single price-triggered (conditional) order on Gate.io.
+func cancelGateFuturesPriceOrder(ctx context.Context, client *http.Client, cfg config, orderID int64) error {
+	path := fmt.Sprintf("/api/v4/futures/usdt/price_orders/%d", orderID)
+	ts := time.Now().Unix()
+	sig := buildGateSignature(cfg.APISecret, "DELETE", path, "", "", ts)
+
+	parsed, err := url.Parse(cfg.RESTBase)
+	if err != nil {
+		return fmt.Errorf("parse gate rest base: %w", err)
+	}
+	parsed.Path = path
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, parsed.String(), nil)
+	if err != nil {
+		return fmt.Errorf("build gate cancel price order request: %w", err)
+	}
+	req.Header.Set("KEY", cfg.APIKey)
+	req.Header.Set("SIGN", sig)
+	req.Header.Set("Timestamp", strconv.FormatInt(ts, 10))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("gate cancel price order request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("gate cancel price order status %s: %s", resp.Status, strings.TrimSpace(string(respBody)))
+	}
+	return nil
+}
+
 // amendGateFuturesOrderPrice changes the price of an existing futures order on Gate.io.
 func amendGateFuturesOrderPrice(ctx context.Context, client *http.Client, cfg config, orderID int64, newPrice string) error {
 	path := fmt.Sprintf("/api/v4/futures/usdt/orders/%d", orderID)

@@ -17,16 +17,18 @@ import (
 
 // openOrder represents a single open (unfilled) order.
 type openOrder struct {
-	Symbol    string
-	OrderID   int64
-	Side      string // BUY / SELL / buy / sell
-	Type      string // LIMIT, MARKET, etc.
-	Price     float64
-	OrigQty   float64
-	FilledQty float64
-	Status    string
-	TimeInForce string
-	Time      int64
+	Symbol       string
+	OrderID      int64
+	Side         string // BUY / SELL / buy / sell
+	Type         string // LIMIT, MARKET, TRIGGER, etc.
+	Price        float64
+	OrigQty      float64
+	FilledQty    float64
+	Status       string
+	TimeInForce  string
+	Time         int64
+	TriggerPrice float64 // Gate.io price-triggered order: trigger price
+	TriggerRule  int     // Gate.io price-triggered order: 1 = >=, 2 = <=
 }
 
 // ── Binance Futures open orders ───────────────────────────────────────────────
@@ -255,6 +257,113 @@ func fetchGateOpenOrders(ctx context.Context, client *http.Client, cfg config) (
 	return orders, nil
 }
 
+// ── Gate.io Futures price-triggered (conditional) orders ──────────────────────
+
+func fetchGatePriceTriggeredOrders(ctx context.Context, client *http.Client, cfg config) ([]openOrder, error) {
+	const path = "/api/v4/futures/usdt/price_orders"
+	ts := time.Now().Unix()
+
+	query := url.Values{}
+	query.Set("status", "open")
+	queryStr := query.Encode()
+
+	sig := buildGateSignature(cfg.APISecret, "GET", path, queryStr, "", ts)
+
+	parsed, err := url.Parse(cfg.RESTBase)
+	if err != nil {
+		return nil, fmt.Errorf("parse gate rest base: %w", err)
+	}
+	parsed.Path = path
+	parsed.RawQuery = queryStr
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build gate price orders request: %w", err)
+	}
+	req.Header.Set("KEY", cfg.APIKey)
+	req.Header.Set("SIGN", sig)
+	req.Header.Set("Timestamp", strconv.FormatInt(ts, 10))
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("gate price orders request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read gate price orders response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gate price orders status %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var payload []struct {
+		ID         int64   `json:"id"`
+		Status     string  `json:"status"`
+		CreateTime float64 `json:"create_time"`
+		OrderType  string  `json:"order_type"`
+		Trigger    struct {
+			StrategyType int    `json:"strategy_type"`
+			PriceType    int    `json:"price_type"`
+			Price        string `json:"price"`
+			Rule         int    `json:"rule"`
+			Expiration   int    `json:"expiration"`
+		} `json:"trigger"`
+		Initial struct {
+			Contract     string `json:"contract"`
+			Size         int64  `json:"size"`
+			Price        string `json:"price"`
+			Tif          string `json:"tif"`
+			IsClose      bool   `json:"is_close"`
+			IsReduceOnly bool   `json:"is_reduce_only"`
+		} `json:"initial"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode gate price orders: %w", err)
+	}
+
+	orders := make([]openOrder, 0, len(payload))
+	for _, item := range payload {
+		price, _ := strconv.ParseFloat(item.Initial.Price, 64)
+		triggerPrice, _ := strconv.ParseFloat(item.Trigger.Price, 64)
+
+		origQty := float64(item.Initial.Size)
+		if origQty < 0 {
+			origQty = -origQty
+		}
+		side := "BUY"
+		if item.Initial.Size < 0 {
+			side = "SELL"
+		}
+		if item.Initial.Size == 0 {
+			switch item.OrderType {
+			case "close-long-order", "close-long-position", "plan-close-long-position":
+				side = "SELL"
+			case "close-short-order", "close-short-position", "plan-close-short-position":
+				side = "BUY"
+			}
+		}
+
+		orders = append(orders, openOrder{
+			Symbol:       item.Initial.Contract,
+			OrderID:      item.ID,
+			Side:         side,
+			Type:         "TRIGGER",
+			Price:        price,
+			OrigQty:      origQty,
+			FilledQty:    0,
+			Status:       strings.ToUpper(item.Status),
+			TimeInForce:  strings.ToUpper(item.Initial.Tif),
+			Time:         int64(item.CreateTime * 1000),
+			TriggerPrice: triggerPrice,
+			TriggerRule:  item.Trigger.Rule,
+		})
+	}
+	return orders, nil
+}
+
 // fetchOpenOrders routes to the correct exchange.
 func fetchOpenOrders(ctx context.Context, client *http.Client, cfg config) (futures []openOrder, spot []openOrder, err error) {
 	if !cfg.hasAccountAuth() {
@@ -262,7 +371,12 @@ func fetchOpenOrders(ctx context.Context, client *http.Client, cfg config) (futu
 	}
 	if cfg.isGate() {
 		f, e := fetchGateOpenOrders(ctx, client, cfg)
-		return f, nil, e
+		if e != nil {
+			return nil, nil, e
+		}
+		triggered, _ := fetchGatePriceTriggeredOrders(ctx, client, cfg)
+		f = append(f, triggered...)
+		return f, nil, nil
 	}
 	f, e1 := fetchBinanceFuturesOpenOrders(ctx, client, cfg)
 	if e1 != nil {
@@ -436,7 +550,14 @@ func (ui *uiModel) renderOpenOrders(futures, spot []openOrder) {
 			}
 			priceStr := formatCompactFloat(o.Price)
 			if o.Price == 0 {
-				priceStr = "MARKET"
+				priceStr = "MKT"
+			}
+			if o.TriggerPrice > 0 {
+				rule := "≥"
+				if o.TriggerRule == 2 {
+					rule = "≤"
+				}
+				priceStr = fmt.Sprintf("%s (%s%s)", priceStr, rule, formatCompactFloat(o.TriggerPrice))
 			}
 			timeStr := time.Unix(o.Time/1000, 0).Format("01-02 15:04")
 
@@ -602,7 +723,12 @@ func (ui *uiModel) showCancelOrderConfirm() {
 			ui.openOrdersHint.SetText("Cancelling order...")
 			go func() {
 				client := &http.Client{Timeout: ui.cfg.Timeout}
-				err := cancelGateFuturesOrder(context.Background(), client, ui.cfg, order.OrderID)
+				var err error
+				if order.Type == "TRIGGER" {
+					err = cancelGateFuturesPriceOrder(context.Background(), client, ui.cfg, order.OrderID)
+				} else {
+					err = cancelGateFuturesOrder(context.Background(), client, ui.cfg, order.OrderID)
+				}
 				if err != nil {
 					ui.app.QueueUpdateDraw(func() {
 						ui.renderOpenOrdersError("cancel order: " + err.Error())
@@ -626,6 +752,9 @@ func (ui *uiModel) showCancelOrderConfirm() {
 func (ui *uiModel) showEditPriceForm() {
 	order, ok := ui.selectedOpenOrder()
 	if !ok {
+		return
+	}
+	if order.Type == "TRIGGER" {
 		return
 	}
 
