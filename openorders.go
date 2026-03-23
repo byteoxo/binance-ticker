@@ -639,9 +639,18 @@ func (ui *uiModel) closeOrderForm() {
 func (ui *uiModel) showNewOrderForm() {
 	_, _, _, _, _, chartSymbol, _, _, _, _, _, _, _, _, _, _, _, _, _ := ui.state.snapshot()
 
+	selectedStyle := tcell.StyleDefault.
+		Foreground(tcell.ColorWhite).
+		Background(tcell.ColorDarkBlue).
+		Attributes(tcell.AttrBold)
+	unselectedStyle := tcell.StyleDefault.
+		Foreground(tcell.ColorWhite).
+		Background(tcell.ColorDefault)
+
 	form := tview.NewForm()
 	form.AddInputField("Contract", chartSymbol, 20, nil, nil)
 	form.AddDropDown("Side", []string{"BUY (long)", "SELL (short)"}, 0, nil)
+	form.GetFormItem(1).(*tview.DropDown).SetListStyles(unselectedStyle, selectedStyle)
 	form.AddInputField("Price", "", 20, func(text string, ch rune) bool {
 		return ch == '.' || (ch >= '0' && ch <= '9')
 	}, nil)
