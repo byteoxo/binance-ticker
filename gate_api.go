@@ -12,6 +12,7 @@ package main
 //   - GET /api/v4/spot/order_book
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha512"
@@ -584,4 +585,176 @@ func fetchGatePositions(ctx context.Context, client *http.Client, cfg config) ([
 		return positions[i].Symbol < positions[j].Symbol
 	})
 	return positions, nil
+}
+
+// ── Gate.io Limit Order Management ───────────────────────────────────────────
+
+// placeGateFuturesLimitOrder places a limit order on Gate.io futures.
+// size: positive for buy/long, negative for sell/short.
+func placeGateFuturesLimitOrder(ctx context.Context, client *http.Client, cfg config, contract string, size int64, price string) (openOrder, error) {
+	const path = "/api/v4/futures/usdt/orders"
+
+	bodyMap := map[string]interface{}{
+		"contract": contract,
+		"size":     size,
+		"price":    price,
+		"tif":      "gtc",
+	}
+	bodyBytes, err := json.Marshal(bodyMap)
+	if err != nil {
+		return openOrder{}, fmt.Errorf("marshal order body: %w", err)
+	}
+
+	ts := time.Now().Unix()
+	sig := buildGateSignature(cfg.APISecret, "POST", path, "", string(bodyBytes), ts)
+
+	parsed, err := url.Parse(cfg.RESTBase)
+	if err != nil {
+		return openOrder{}, fmt.Errorf("parse gate rest base: %w", err)
+	}
+	parsed.Path = path
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, parsed.String(), bytes.NewReader(bodyBytes))
+	if err != nil {
+		return openOrder{}, fmt.Errorf("build gate order request: %w", err)
+	}
+	req.Header.Set("KEY", cfg.APIKey)
+	req.Header.Set("SIGN", sig)
+	req.Header.Set("Timestamp", strconv.FormatInt(ts, 10))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return openOrder{}, fmt.Errorf("gate order request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return openOrder{}, fmt.Errorf("read gate order response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return openOrder{}, fmt.Errorf("gate order status %s: %s", resp.Status, strings.TrimSpace(string(respBody)))
+	}
+
+	var payload struct {
+		ID         int64   `json:"id"`
+		Contract   string  `json:"contract"`
+		Size       int64   `json:"size"`
+		Price      string  `json:"price"`
+		Left       int64   `json:"left"`
+		Tif        string  `json:"tif"`
+		Status     string  `json:"status"`
+		CreateTime float64 `json:"create_time"`
+	}
+	if err := json.Unmarshal(respBody, &payload); err != nil {
+		return openOrder{}, fmt.Errorf("decode gate order response: %w", err)
+	}
+
+	p, _ := strconv.ParseFloat(payload.Price, 64)
+	origQty := float64(payload.Size)
+	if origQty < 0 {
+		origQty = -origQty
+	}
+	filled := origQty - float64(payload.Left)
+	if filled < 0 {
+		filled = 0
+	}
+	side := "BUY"
+	if payload.Size < 0 {
+		side = "SELL"
+	}
+
+	return openOrder{
+		Symbol:      payload.Contract,
+		OrderID:     payload.ID,
+		Side:        side,
+		Type:        "LIMIT",
+		Price:       p,
+		OrigQty:     origQty,
+		FilledQty:   filled,
+		Status:      strings.ToUpper(payload.Status),
+		TimeInForce: strings.ToUpper(payload.Tif),
+		Time:        int64(payload.CreateTime * 1000),
+	}, nil
+}
+
+// cancelGateFuturesOrder cancels a single futures order on Gate.io.
+func cancelGateFuturesOrder(ctx context.Context, client *http.Client, cfg config, orderID int64) error {
+	path := fmt.Sprintf("/api/v4/futures/usdt/orders/%d", orderID)
+	ts := time.Now().Unix()
+	sig := buildGateSignature(cfg.APISecret, "DELETE", path, "", "", ts)
+
+	parsed, err := url.Parse(cfg.RESTBase)
+	if err != nil {
+		return fmt.Errorf("parse gate rest base: %w", err)
+	}
+	parsed.Path = path
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, parsed.String(), nil)
+	if err != nil {
+		return fmt.Errorf("build gate cancel request: %w", err)
+	}
+	req.Header.Set("KEY", cfg.APIKey)
+	req.Header.Set("SIGN", sig)
+	req.Header.Set("Timestamp", strconv.FormatInt(ts, 10))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("gate cancel request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("gate cancel status %s: %s", resp.Status, strings.TrimSpace(string(respBody)))
+	}
+	return nil
+}
+
+// amendGateFuturesOrderPrice changes the price of an existing futures order on Gate.io.
+func amendGateFuturesOrderPrice(ctx context.Context, client *http.Client, cfg config, orderID int64, newPrice string) error {
+	path := fmt.Sprintf("/api/v4/futures/usdt/orders/%d", orderID)
+
+	bodyMap := map[string]interface{}{
+		"price": newPrice,
+	}
+	bodyBytes, err := json.Marshal(bodyMap)
+	if err != nil {
+		return fmt.Errorf("marshal amend body: %w", err)
+	}
+
+	ts := time.Now().Unix()
+	sig := buildGateSignature(cfg.APISecret, "PUT", path, "", string(bodyBytes), ts)
+
+	parsed, err := url.Parse(cfg.RESTBase)
+	if err != nil {
+		return fmt.Errorf("parse gate rest base: %w", err)
+	}
+	parsed.Path = path
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, parsed.String(), bytes.NewReader(bodyBytes))
+	if err != nil {
+		return fmt.Errorf("build gate amend request: %w", err)
+	}
+	req.Header.Set("KEY", cfg.APIKey)
+	req.Header.Set("SIGN", sig)
+	req.Header.Set("Timestamp", strconv.FormatInt(ts, 10))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("gate amend request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("gate amend status %s: %s", resp.Status, strings.TrimSpace(string(respBody)))
+	}
+	return nil
 }

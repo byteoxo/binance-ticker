@@ -35,11 +35,15 @@ type uiModel struct {
 	orderBookSymbol  string
 	orderBookBaseURL string
 	orderBookPanel   panelMode
-	openOrders       tview.Primitive
-	openOrdersFrame  *tview.Frame
-	openOrdersTable  *tview.Table
-	openOrdersOpen   bool
-	openOrdersCancel context.CancelFunc
+	openOrders           tview.Primitive
+	openOrdersFrame      *tview.Frame
+	openOrdersTable      *tview.Table
+	openOrdersHint       *tview.TextView
+	openOrdersOpen       bool
+	openOrdersCancel     context.CancelFunc
+	openOrdersData       []openOrder
+	openOrdersDataOffset int
+	orderFormOpen        bool
 }
 
 func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int), changeInterval func()) *uiModel {
@@ -77,6 +81,9 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 		{"i", "Cycle chart interval (1h→2h→4h→1d→3d)"},
 		{"o", "Open order book for current symbol"},
 		{"u", "Open open orders panel (requires API key)"},
+		{"n", "New limit order (Gate.io, in open orders)"},
+		{"d", "Cancel selected order (Gate.io, in open orders)"},
+		{"e", "Edit order price (Gate.io, in open orders)"},
 		{"q", "Quit"},
 		{"Ctrl+C", "Quit"},
 		{"Esc", "Close help / modal / order book"},
@@ -112,7 +119,7 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 		AddItem(nil, 0, 1, false).
 		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
 			AddItem(nil, 0, 1, false).
-			AddItem(helpFrame, 14, 0, false).
+			AddItem(helpFrame, 17, 0, false).
 			AddItem(nil, 0, 1, false), 64, 0, true).
 		AddItem(nil, 0, 1, false)
 
@@ -131,9 +138,9 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 	footer.SetText("/ or h help | Tab switch panel | Arrows switch chart | i interval | o order book | u open orders | q / Ctrl+C quit")
 
 	ob, obFrame, obTable := buildOrderBookUI()
-	oo, ooFrame, ooTable := buildOpenOrdersUI()
+	oo, ooFrame, ooTable, ooHint := buildOpenOrdersUI()
 
-	ui := &uiModel{app: app, header: header, status: status, table: table, positions: positions, chart: chart, footer: footer, help: help, cfg: cfg, loc: loc, state: state, changeChart: changeChart, changeInterval: changeInterval, orderBook: ob, orderBookFrame: obFrame, orderBookTable: obTable, openOrders: oo, openOrdersFrame: ooFrame, openOrdersTable: ooTable}
+	ui := &uiModel{app: app, header: header, status: status, table: table, positions: positions, chart: chart, footer: footer, help: help, cfg: cfg, loc: loc, state: state, changeChart: changeChart, changeInterval: changeInterval, orderBook: ob, orderBookFrame: obFrame, orderBookTable: obTable, openOrders: oo, openOrdersFrame: ooFrame, openOrdersTable: ooTable, openOrdersHint: ooHint}
 	ui.refresh()
 	ui.pages = tview.NewPages().
 		AddPage("main", ui.layout(), true, true).
@@ -204,9 +211,21 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 			return nil
 		}
 		if ui.openOrdersOpen {
+			if ui.orderFormOpen {
+				if event.Key() == tcell.KeyEsc {
+					ui.closeOrderForm()
+					return nil
+				}
+				return event
+			}
 			switch event.Key() {
 			case tcell.KeyEsc:
 				ui.hideOpenOrders()
+				return nil
+			case tcell.KeyUp, tcell.KeyDown:
+				if ui.cfg.isGate() {
+					return event
+				}
 				return nil
 			}
 			switch event.Rune() {
@@ -215,6 +234,21 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 				return nil
 			case 'r', 'R':
 				go ui.doOpenOrdersFetch(context.Background())
+				return nil
+			case 'n', 'N':
+				if ui.cfg.isGate() {
+					ui.showNewOrderForm()
+				}
+				return nil
+			case 'd', 'D':
+				if ui.cfg.isGate() {
+					ui.showCancelOrderConfirm()
+				}
+				return nil
+			case 'e', 'E':
+				if ui.cfg.isGate() {
+					ui.showEditPriceForm()
+				}
 				return nil
 			}
 			return nil
