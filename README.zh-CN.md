@@ -156,7 +156,13 @@ api_secret = "your_api_secret_here"
 
 1. 登录 [binance.com](https://www.binance.com)，进入 **API 管理** → **创建 API**。
 2. 选择**系统生成**（HMAC）方式。Secret Key 只显示一次，请立即保存。
-3. 仅开启**读取权限（Read Info）**，不要开启交易、提现等写权限。
+3. **IP 限制**选择**无限制（Unrestricted）**，否则本工具无法正常连接。
+4. 开启以下权限：
+   - **读取权限（Read Info）** — 查看持仓、余额、挂单等必需。
+   - **启用合约（Enable Futures）** — 合约下单 / 撤单 / 改单必需。
+   - **启用现货和杠杆交易（Enable Spot & Margin Trading）** — 现货订单管理必需。
+
+> ⚠️ 为安全起见，请**不要**开启**提现（Enable Withdrawals）**或**划转（Enable Internal Transfer）**权限。仅授予你需要的最小权限。
 
 > 完整操作指引：[如何在币安创建 API Keys](https://www.binance.com/en/support/faq/how-to-create-api-keys-on-binance-360002502072)
 

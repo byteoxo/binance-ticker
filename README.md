@@ -156,7 +156,13 @@ api_secret = "your_api_secret_here"
 
 1. Log in to [binance.com](https://www.binance.com) and go to **API Management** → **Create API**.
 2. Choose **System-generated** (HMAC). Save the Secret Key immediately — it is shown only once.
-3. Enable **Read Info** only. Do not enable trading or withdrawal permissions.
+3. Under **IP Restrictions**, select **Unrestricted** (required for this tool to work).
+4. Enable the following permissions:
+   - **Read Info** — required for viewing positions, balances, and open orders.
+   - **Enable Futures** — required for placing / cancelling / modifying futures orders.
+   - **Enable Spot & Margin Trading** — required for spot order management.
+
+> ⚠️ For security, do **not** enable **Enable Withdrawals** or **Enable Internal Transfer**. Only grant the minimum permissions you need.
 
 > Full walkthrough: [How to Create API Keys on Binance](https://www.binance.com/en/support/faq/how-to-create-api-keys-on-binance-360002502072)
 
