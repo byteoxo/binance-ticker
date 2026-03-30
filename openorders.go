@@ -281,6 +281,41 @@ func cancelBinanceFuturesOrder(ctx context.Context, client *http.Client, cfg con
 	return nil
 }
 
+// amendBinanceFuturesOrder modifies the price and quantity of an existing futures order on Binance.
+func amendBinanceFuturesOrder(ctx context.Context, client *http.Client, cfg config, symbol string, orderID int64, side, quantity, price string) error {
+	query := url.Values{}
+	query.Set("orderId", strconv.FormatInt(orderID, 10))
+	query.Set("symbol", symbol)
+	query.Set("side", strings.ToUpper(side))
+	query.Set("quantity", quantity)
+	query.Set("price", price)
+	query.Set("timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	query.Set("recvWindow", strconv.FormatInt(int64(cfg.Timeout/time.Millisecond), 10))
+
+	endpoint, err := buildSignedURL(cfg.RESTBase, "/fapi/v1/order", query, cfg.APISecret)
+	if err != nil {
+		return fmt.Errorf("build binance amend url: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("build binance amend request: %w", err)
+	}
+	req.Header.Set("X-MBX-APIKEY", cfg.APIKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("binance amend request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("binance amend status %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
 // ── Gate.io Futures open orders ───────────────────────────────────────────────
 
 func fetchGateOpenOrders(ctx context.Context, client *http.Client, cfg config) ([]openOrder, error) {
