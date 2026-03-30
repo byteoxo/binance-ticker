@@ -169,6 +169,118 @@ func fetchBinanceSpotOpenOrders(ctx context.Context, client *http.Client, cfg co
 	return orders, nil
 }
 
+// ── Binance Futures Order Management ──────────────────────────────────────────
+
+// placeBinanceFuturesOrder places an order on Binance futures.
+// orderType: LIMIT, STOP, TAKE_PROFIT, STOP_MARKET, TAKE_PROFIT_MARKET.
+func placeBinanceFuturesOrder(ctx context.Context, client *http.Client, cfg config, symbol, side, orderType, quantity, price, stopPrice, timeInForce string) (openOrder, error) {
+	query := url.Values{}
+	query.Set("symbol", symbol)
+	query.Set("side", strings.ToUpper(side))
+	query.Set("type", strings.ToUpper(orderType))
+	query.Set("quantity", quantity)
+	if timeInForce != "" {
+		query.Set("timeInForce", timeInForce)
+	}
+	if price != "" {
+		query.Set("price", price)
+	}
+	if stopPrice != "" {
+		query.Set("stopPrice", stopPrice)
+	}
+	query.Set("timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	query.Set("recvWindow", strconv.FormatInt(int64(cfg.Timeout/time.Millisecond), 10))
+
+	endpoint, err := buildSignedURL(cfg.RESTBase, "/fapi/v1/order", query, cfg.APISecret)
+	if err != nil {
+		return openOrder{}, fmt.Errorf("build binance order url: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return openOrder{}, fmt.Errorf("build binance order request: %w", err)
+	}
+	req.Header.Set("X-MBX-APIKEY", cfg.APIKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return openOrder{}, fmt.Errorf("binance order request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return openOrder{}, fmt.Errorf("read binance order response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return openOrder{}, fmt.Errorf("binance order status %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var payload struct {
+		Symbol      string `json:"symbol"`
+		OrderID     int64  `json:"orderId"`
+		Side        string `json:"side"`
+		Type        string `json:"type"`
+		Price       string `json:"price"`
+		OrigQty     string `json:"origQty"`
+		ExecutedQty string `json:"executedQty"`
+		Status      string `json:"status"`
+		TimeInForce string `json:"timeInForce"`
+		UpdateTime  int64  `json:"updateTime"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return openOrder{}, fmt.Errorf("decode binance order response: %w", err)
+	}
+
+	p, _ := strconv.ParseFloat(payload.Price, 64)
+	origQty, _ := strconv.ParseFloat(payload.OrigQty, 64)
+	filledQty, _ := strconv.ParseFloat(payload.ExecutedQty, 64)
+	return openOrder{
+		Symbol:      payload.Symbol,
+		OrderID:     payload.OrderID,
+		Side:        payload.Side,
+		Type:        payload.Type,
+		Price:       p,
+		OrigQty:     origQty,
+		FilledQty:   filledQty,
+		Status:      payload.Status,
+		TimeInForce: payload.TimeInForce,
+		Time:        payload.UpdateTime,
+	}, nil
+}
+
+// cancelBinanceFuturesOrder cancels a single futures order on Binance.
+func cancelBinanceFuturesOrder(ctx context.Context, client *http.Client, cfg config, symbol string, orderID int64) error {
+	query := url.Values{}
+	query.Set("symbol", symbol)
+	query.Set("orderId", strconv.FormatInt(orderID, 10))
+	query.Set("timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	query.Set("recvWindow", strconv.FormatInt(int64(cfg.Timeout/time.Millisecond), 10))
+
+	endpoint, err := buildSignedURL(cfg.RESTBase, "/fapi/v1/order", query, cfg.APISecret)
+	if err != nil {
+		return fmt.Errorf("build binance cancel url: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("build binance cancel request: %w", err)
+	}
+	req.Header.Set("X-MBX-APIKEY", cfg.APIKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("binance cancel request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("binance cancel status %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
 // ── Gate.io Futures open orders ───────────────────────────────────────────────
 
 func fetchGateOpenOrders(ctx context.Context, client *http.Client, cfg config) ([]openOrder, error) {
