@@ -120,7 +120,7 @@ Defaults applied automatically:
 
 ## API Key Setup (Optional)
 
-An API key is **not required** to view market data. It is only needed to display your **futures positions** and **spot balances**.
+An API key is **not required** to view market data. It is only needed for **account features** such as viewing futures positions and spot balances, as well as **placing, cancelling, and modifying orders**.
 
 ### Setting keys via environment variables (recommended)
 
