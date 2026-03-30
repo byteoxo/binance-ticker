@@ -575,21 +575,14 @@ func (ui *uiModel) showOpenOrders() {
 	ui.openOrdersOpen = true
 	ui.pages.ShowPage("openorders")
 
-	if ui.cfg.isGate() {
-		ui.openOrdersTable.SetSelectable(true, false)
-		ui.openOrdersTable.SetFixed(2, 0)
-		ui.openOrdersTable.SetSelectedStyle(tcell.StyleDefault.
-			Foreground(tcell.ColorWhite).
-			Background(tcell.ColorDarkBlue).
-			Attributes(tcell.AttrBold))
-		ui.resetOpenOrdersHint()
-		ui.app.SetFocus(ui.openOrdersTable)
-	} else {
-		ui.openOrdersTable.SetSelectable(false, false)
-		ui.openOrdersTable.SetFixed(1, 0)
-		ui.resetOpenOrdersHint()
-		ui.app.SetFocus(ui.openOrders)
-	}
+	ui.openOrdersTable.SetSelectable(true, false)
+	ui.openOrdersTable.SetFixed(2, 0)
+	ui.openOrdersTable.SetSelectedStyle(tcell.StyleDefault.
+		Foreground(tcell.ColorWhite).
+		Background(tcell.ColorDarkBlue).
+		Attributes(tcell.AttrBold))
+	ui.resetOpenOrdersHint()
+	ui.app.SetFocus(ui.openOrdersTable)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ui.openOrdersCancel = cancel
@@ -646,9 +639,9 @@ func (ui *uiModel) renderOpenOrders(futures, spot []openOrder) {
 	ui.openOrdersTable.Clear()
 	ui.openOrdersData = nil
 	ui.openOrdersDataOffset = 0
-	gateMode := ui.cfg.isGate()
 
 	row := 0
+	selectable := true
 	headers := []string{"SYMBOL", "SIDE", "TYPE", "PRICE", "QTY", "FILLED", "TIF", "STATUS", "TIME"}
 
 	setHeader := func(text string, col int) {
@@ -661,7 +654,7 @@ func (ui *uiModel) renderOpenOrders(futures, spot []openOrder) {
 
 	setCell := func(text, color string, r, col int) {
 		cell := tview.NewTableCell(ui.ooCell(color, text)).
-			SetSelectable(gateMode).
+			SetSelectable(selectable).
 			SetBackgroundColor(tcell.ColorDefault).
 			SetExpansion(1)
 		ui.openOrdersTable.SetCell(r, col, cell)
@@ -726,15 +719,18 @@ func (ui *uiModel) renderOpenOrders(futures, spot []openOrder) {
 		return dataStart
 	}
 
-	if gateMode {
-		dataStart := renderSection("Gate.io Futures", futures)
-		ui.openOrdersData = futures
-		ui.openOrdersDataOffset = dataStart
-		if len(futures) > 0 {
-			ui.openOrdersTable.Select(dataStart, 0)
-		}
-	} else {
-		renderSection("Binance Futures", futures)
+	exchangeLabel := "Binance"
+	if ui.cfg.isGate() {
+		exchangeLabel = "Gate.io"
+	}
+	dataStart := renderSection(exchangeLabel+" Futures", futures)
+	ui.openOrdersData = futures
+	ui.openOrdersDataOffset = dataStart
+	if len(futures) > 0 {
+		ui.openOrdersTable.Select(dataStart, 0)
+	}
+	if !ui.cfg.isGate() {
+		selectable = false
 		renderSection("Binance Spot", spot)
 	}
 }
@@ -758,11 +754,7 @@ func (ui *uiModel) ooCell(colorTag, text string) string {
 // ── Gate.io order management helpers ──────────────────────────────────────────
 
 func (ui *uiModel) resetOpenOrdersHint() {
-	if ui.cfg.isGate() {
-		ui.openOrdersHint.SetText("n new  d cancel  e edit price  r refresh  Esc/u close")
-	} else {
-		ui.openOrdersHint.SetText("r refresh  Esc/u close")
-	}
+	ui.openOrdersHint.SetText("n new  d cancel  e edit  r refresh  Esc/u close")
 }
 
 func (ui *uiModel) selectedOpenOrder() (openOrder, bool) {
@@ -793,11 +785,19 @@ func (ui *uiModel) showNewOrderForm() {
 	unselectedStyle := tcell.StyleDefault.
 		Foreground(tcell.ColorWhite).
 		Background(tcell.ColorDefault)
+	numFilter := func(_ string, ch rune) bool {
+		return ch == '.' || (ch >= '0' && ch <= '9')
+	}
 
 	form := tview.NewForm()
-	form.AddInputField("Contract", chartSymbol, 20, nil, nil)
+	symbolLabel := "Symbol"
+	if ui.cfg.isGate() {
+		symbolLabel = "Contract"
+	}
+	form.AddInputField(symbolLabel, chartSymbol, 20, nil, nil)
+
 	dropdownReady := false
-	form.AddDropDown("Side", []string{"BUY (long)", "SELL (short)"}, 0, func(option string, optionIndex int) {
+	form.AddDropDown("Side", []string{"BUY (long)", "SELL (short)"}, 0, func(_ string, _ int) {
 		if dropdownReady {
 			if p, ok := form.GetFormItem(2).(tview.Primitive); ok {
 				ui.app.SetFocus(p)
@@ -806,65 +806,125 @@ func (ui *uiModel) showNewOrderForm() {
 	})
 	dropdownReady = true
 	form.GetFormItem(1).(*tview.DropDown).SetListStyles(unselectedStyle, selectedStyle)
-	form.AddInputField("Price", "", 20, func(text string, ch rune) bool {
-		return ch == '.' || (ch >= '0' && ch <= '9')
-	}, nil)
-	form.AddInputField("Size", "1", 10, func(text string, ch rune) bool {
-		return ch >= '0' && ch <= '9'
-	}, nil)
-	form.AddButton("Submit", func() {
-		contractField := form.GetFormItem(0).(*tview.InputField)
-		sideDropdown := form.GetFormItem(1).(*tview.DropDown)
-		priceField := form.GetFormItem(2).(*tview.InputField)
-		sizeField := form.GetFormItem(3).(*tview.InputField)
 
-		contract := strings.TrimSpace(contractField.GetText())
-		if contract == "" {
-			return
-		}
-		priceStr := strings.TrimSpace(priceField.GetText())
-		if _, err := strconv.ParseFloat(priceStr, 64); err != nil {
-			return
-		}
-		sizeVal, err := strconv.ParseInt(strings.TrimSpace(sizeField.GetText()), 10, 64)
-		if err != nil || sizeVal <= 0 {
-			return
-		}
-		sideIdx, _ := sideDropdown.GetCurrentOption()
-		if sideIdx == 1 {
-			sizeVal = -sizeVal
-		}
-
-		ui.closeOrderForm()
-		ui.openOrdersHint.SetText("Placing order...")
-
-		go func() {
-			client := &http.Client{Timeout: ui.cfg.Timeout}
-			_, err := placeGateFuturesLimitOrder(context.Background(), client, ui.cfg, contract, sizeVal, priceStr)
-			if err != nil {
-				ui.app.QueueUpdateDraw(func() {
-					ui.renderOpenOrdersError("place order: " + err.Error())
-					ui.resetOpenOrdersHint()
-				})
+	if ui.cfg.isGate() {
+		form.AddInputField("Price", "", 20, numFilter, nil)
+		form.AddInputField("Size", "1", 10, func(_ string, ch rune) bool {
+			return ch >= '0' && ch <= '9'
+		}, nil)
+		form.AddButton("Submit", func() {
+			contract := strings.TrimSpace(form.GetFormItem(0).(*tview.InputField).GetText())
+			if contract == "" {
 				return
 			}
-			ui.doOpenOrdersFetch(context.Background())
-			ui.app.QueueUpdateDraw(func() {
-				ui.resetOpenOrdersHint()
-			})
-		}()
-	})
-	form.AddButton("Cancel", func() {
-		ui.closeOrderForm()
-	})
-	form.SetBorder(true).SetTitle(" New Limit Order ").SetTitleAlign(tview.AlignCenter)
+			priceStr := strings.TrimSpace(form.GetFormItem(2).(*tview.InputField).GetText())
+			if _, err := strconv.ParseFloat(priceStr, 64); err != nil {
+				return
+			}
+			sizeVal, err := strconv.ParseInt(strings.TrimSpace(form.GetFormItem(3).(*tview.InputField).GetText()), 10, 64)
+			if err != nil || sizeVal <= 0 {
+				return
+			}
+			sideIdx, _ := form.GetFormItem(1).(*tview.DropDown).GetCurrentOption()
+			if sideIdx == 1 {
+				sizeVal = -sizeVal
+			}
+			ui.closeOrderForm()
+			ui.openOrdersHint.SetText("Placing order...")
+			go func() {
+				client := &http.Client{Timeout: ui.cfg.Timeout}
+				_, err := placeGateFuturesLimitOrder(context.Background(), client, ui.cfg, contract, sizeVal, priceStr)
+				if err != nil {
+					ui.app.QueueUpdateDraw(func() {
+						ui.renderOpenOrdersError("place order: " + err.Error())
+						ui.resetOpenOrdersHint()
+					})
+					return
+				}
+				ui.doOpenOrdersFetch(context.Background())
+				ui.app.QueueUpdateDraw(func() { ui.resetOpenOrdersHint() })
+			}()
+		})
+	} else {
+		typeReady := false
+		form.AddDropDown("Type", []string{"LIMIT", "STOP", "TAKE_PROFIT", "STOP_MARKET", "TAKE_PROFIT_MARKET"}, 0, func(_ string, _ int) {
+			if typeReady {
+				if p, ok := form.GetFormItem(3).(tview.Primitive); ok {
+					ui.app.SetFocus(p)
+				}
+			}
+		})
+		typeReady = true
+		form.GetFormItem(2).(*tview.DropDown).SetListStyles(unselectedStyle, selectedStyle)
+		form.AddInputField("Price", "", 20, numFilter, nil)
+		form.AddInputField("Stop Price", "", 20, numFilter, nil)
+		form.AddInputField("Quantity", "", 15, numFilter, nil)
+		form.AddButton("Submit", func() {
+			sym := strings.TrimSpace(form.GetFormItem(0).(*tview.InputField).GetText())
+			if sym == "" {
+				return
+			}
+			sideIdx, _ := form.GetFormItem(1).(*tview.DropDown).GetCurrentOption()
+			side := "BUY"
+			if sideIdx == 1 {
+				side = "SELL"
+			}
+			_, typeName := form.GetFormItem(2).(*tview.DropDown).GetCurrentOption()
+			priceStr := strings.TrimSpace(form.GetFormItem(3).(*tview.InputField).GetText())
+			stopPriceStr := strings.TrimSpace(form.GetFormItem(4).(*tview.InputField).GetText())
+			qtyStr := strings.TrimSpace(form.GetFormItem(5).(*tview.InputField).GetText())
+			if _, err := strconv.ParseFloat(qtyStr, 64); err != nil {
+				return
+			}
+			tif := ""
+			switch typeName {
+			case "LIMIT", "STOP", "TAKE_PROFIT":
+				if _, err := strconv.ParseFloat(priceStr, 64); err != nil {
+					return
+				}
+				tif = "GTC"
+			}
+			switch typeName {
+			case "STOP", "TAKE_PROFIT", "STOP_MARKET", "TAKE_PROFIT_MARKET":
+				if _, err := strconv.ParseFloat(stopPriceStr, 64); err != nil {
+					return
+				}
+			default:
+				stopPriceStr = ""
+			}
+			ui.closeOrderForm()
+			ui.openOrdersHint.SetText("Placing order...")
+			go func() {
+				client := &http.Client{Timeout: ui.cfg.Timeout}
+				_, err := placeBinanceFuturesOrder(context.Background(), client, ui.cfg, sym, side, typeName, qtyStr, priceStr, stopPriceStr, tif)
+				if err != nil {
+					ui.app.QueueUpdateDraw(func() {
+						ui.renderOpenOrdersError("place order: " + err.Error())
+						ui.resetOpenOrdersHint()
+					})
+					return
+				}
+				ui.doOpenOrdersFetch(context.Background())
+				ui.app.QueueUpdateDraw(func() { ui.resetOpenOrdersHint() })
+			}()
+		})
+	}
+
+	form.AddButton("Cancel", func() { ui.closeOrderForm() })
+	title := " New Limit Order "
+	formHeight := 15
+	if !ui.cfg.isGate() {
+		title = " New Order "
+		formHeight = 21
+	}
+	form.SetBorder(true).SetTitle(title).SetTitleAlign(tview.AlignCenter)
 	form.SetBackgroundColor(tcell.ColorDefault)
 
 	overlay := tview.NewFlex().
 		AddItem(nil, 0, 1, false).
 		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
 			AddItem(nil, 0, 1, false).
-			AddItem(form, 15, 0, true).
+			AddItem(form, formHeight, 0, true).
 			AddItem(nil, 0, 1, false), 50, 0, true).
 		AddItem(nil, 0, 1, false)
 
@@ -892,10 +952,14 @@ func (ui *uiModel) showCancelOrderConfirm() {
 			go func() {
 				client := &http.Client{Timeout: ui.cfg.Timeout}
 				var err error
-				if order.Type == "TRIGGER" {
-					err = cancelGateFuturesPriceOrder(context.Background(), client, ui.cfg, order.OrderID)
+				if ui.cfg.isGate() {
+					if order.Type == "TRIGGER" {
+						err = cancelGateFuturesPriceOrder(context.Background(), client, ui.cfg, order.OrderID)
+					} else {
+						err = cancelGateFuturesOrder(context.Background(), client, ui.cfg, order.OrderID)
+					}
 				} else {
-					err = cancelGateFuturesOrder(context.Background(), client, ui.cfg, order.OrderID)
+					err = cancelBinanceFuturesOrder(context.Background(), client, ui.cfg, order.Symbol, order.OrderID)
 				}
 				if err != nil {
 					ui.app.QueueUpdateDraw(func() {
@@ -922,30 +986,46 @@ func (ui *uiModel) showEditPriceForm() {
 	if !ok {
 		return
 	}
-	if order.Type == "TRIGGER" {
+	if order.Type != "LIMIT" {
 		return
 	}
 
-	form := tview.NewForm()
-	form.AddInputField("New Price", formatCompactFloat(order.Price), 20, func(text string, ch rune) bool {
+	numFilter := func(_ string, ch rune) bool {
 		return ch == '.' || (ch >= '0' && ch <= '9')
-	}, nil)
+	}
+
+	form := tview.NewForm()
+	form.AddInputField("New Price", formatCompactFloat(order.Price), 20, numFilter, nil)
+	if !ui.cfg.isGate() {
+		form.AddInputField("New Quantity", formatCompactFloat(order.OrigQty), 20, numFilter, nil)
+	}
 	form.AddButton("Submit", func() {
-		priceField := form.GetFormItem(0).(*tview.InputField)
-		newPrice := strings.TrimSpace(priceField.GetText())
+		newPrice := strings.TrimSpace(form.GetFormItem(0).(*tview.InputField).GetText())
 		if _, err := strconv.ParseFloat(newPrice, 64); err != nil {
 			return
 		}
+		var newQty string
+		if !ui.cfg.isGate() {
+			newQty = strings.TrimSpace(form.GetFormItem(1).(*tview.InputField).GetText())
+			if _, err := strconv.ParseFloat(newQty, 64); err != nil {
+				return
+			}
+		}
 
 		ui.closeOrderForm()
-		ui.openOrdersHint.SetText("Amending order price...")
+		ui.openOrdersHint.SetText("Amending order...")
 
 		go func() {
 			client := &http.Client{Timeout: ui.cfg.Timeout}
-			err := amendGateFuturesOrderPrice(context.Background(), client, ui.cfg, order.OrderID, newPrice)
+			var err error
+			if ui.cfg.isGate() {
+				err = amendGateFuturesOrderPrice(context.Background(), client, ui.cfg, order.OrderID, newPrice)
+			} else {
+				err = amendBinanceFuturesOrder(context.Background(), client, ui.cfg, order.Symbol, order.OrderID, order.Side, newQty, newPrice)
+			}
 			if err != nil {
 				ui.app.QueueUpdateDraw(func() {
-					ui.renderOpenOrdersError("amend price: " + err.Error())
+					ui.renderOpenOrdersError("amend order: " + err.Error())
 					ui.resetOpenOrdersHint()
 				})
 				return
@@ -965,11 +1045,16 @@ func (ui *uiModel) showEditPriceForm() {
 		SetTitleAlign(tview.AlignCenter)
 	form.SetBackgroundColor(tcell.ColorDefault)
 
+	formHeight := 9
+	if !ui.cfg.isGate() {
+		formHeight = 11
+	}
+
 	overlay := tview.NewFlex().
 		AddItem(nil, 0, 1, false).
 		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
 			AddItem(nil, 0, 1, false).
-			AddItem(form, 9, 0, true).
+			AddItem(form, formHeight, 0, true).
 			AddItem(nil, 0, 1, false), 50, 0, true).
 		AddItem(nil, 0, 1, false)
 

@@ -81,9 +81,9 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 		{"i", "Cycle chart interval (1h→2h→4h→1d→3d)"},
 		{"o", "Open order book for current symbol"},
 		{"u", "Open open orders panel (requires API key)"},
-		{"n", "New limit order (Gate.io, in open orders)"},
-		{"d", "Cancel selected order (Gate.io, in open orders)"},
-		{"e", "Edit order price (Gate.io, in open orders)"},
+		{"n", "New order (in open orders panel)"},
+		{"d", "Cancel selected order (in open orders panel)"},
+		{"e", "Edit order (in open orders panel)"},
 		{"q", "Quit"},
 		{"Ctrl+C", "Quit"},
 		{"Esc", "Close help / modal / order book"},
@@ -223,10 +223,7 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 				ui.hideOpenOrders()
 				return nil
 			case tcell.KeyUp, tcell.KeyDown:
-				if ui.cfg.isGate() {
-					return event
-				}
-				return nil
+				return event
 			}
 			switch event.Rune() {
 			case 'u', 'U':
@@ -236,19 +233,13 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 				go ui.doOpenOrdersFetch(context.Background())
 				return nil
 			case 'n', 'N':
-				if ui.cfg.isGate() {
-					ui.showNewOrderForm()
-				}
+				ui.showNewOrderForm()
 				return nil
 			case 'd', 'D':
-				if ui.cfg.isGate() {
-					ui.showCancelOrderConfirm()
-				}
+				ui.showCancelOrderConfirm()
 				return nil
 			case 'e', 'E':
-				if ui.cfg.isGate() {
-					ui.showEditPriceForm()
-				}
+				ui.showEditPriceForm()
 				return nil
 			}
 			return nil
