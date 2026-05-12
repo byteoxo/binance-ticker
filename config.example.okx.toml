@@ -1,0 +1,29 @@
+# OKX — copy to config.toml (or ./config.toml in the app working directory).
+#
+# Use OKX API v5 instrument ids as shown on https://www.okx.com (Trade → instrument name).
+# Perpetual swaps:  BASE-QUOTE-SWAP  e.g. BTC-USDT-SWAP, ETH-USDT-SWAP
+# Spot pairs:        BASE-QUOTE       e.g. BTC-USDT, ETH-USDT
+#
+# Internally the app maps these to compact row keys (e.g. BTCUSDT) for the ticker table and chart.
+
+exchange = "okx"
+
+symbols = ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP"]
+spot_symbols = ["BTC-USDT", "ETH-USDT"]
+chart_symbol = "BTC-USDT-SWAP"
+chart_limit = 16
+default_panel = "futures"
+timeout = "8s"
+tz = "UTC"
+
+# Defaults when omitted:
+# rest_base = "https://www.okx.com"
+# ws_base   = "wss://ws.okx.com:8443/ws/v5/public"
+
+no_color = false
+retry_delay = "2s"
+
+# Required together for positions, orders, and balances (see env vars in config.example.toml).
+api_key = ""
+api_secret = ""
+api_passphrase = ""
