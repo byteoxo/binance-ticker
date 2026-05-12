@@ -13,12 +13,12 @@ import (
 
 const (
 	// Binance Futures
-	defaultWSBaseURL        = "wss://fstream.binance.com"
-	defaultRESTBaseURL      = "https://fapi.binance.com"
-	futuresKlinePath        = "/fapi/v1/klines"
-	positionRiskPath        = "/fapi/v3/positionRisk"
-	listenKeyPath           = "/fapi/v1/listenKey"
-	futuresDepthPath        = "/fapi/v1/depth"
+	defaultWSBaseURL   = "wss://fstream.binance.com"
+	defaultRESTBaseURL = "https://fapi.binance.com"
+	futuresKlinePath   = "/fapi/v1/klines"
+	positionRiskPath   = "/fapi/v3/positionRisk"
+	listenKeyPath      = "/fapi/v1/listenKey"
+	futuresDepthPath   = "/fapi/v1/depth"
 	// Binance Spot
 	defaultSpotWSBaseURL    = "wss://stream.binance.com:9443"
 	defaultSpotRESTBaseURL  = "https://api.binance.com"
@@ -27,46 +27,57 @@ const (
 	defaultSpotWSAPIBaseURL = "wss://ws-api.binance.com:443/ws-api/v3"
 	spotDepthPath           = "/api/v3/depth"
 	// Gate.io Futures
-	defaultGateWSBaseURL      = "wss://fx-ws.gateio.ws/v4/ws/usdt"
-	defaultGateRESTBaseURL    = "https://fx-api.gateio.ws"
+	defaultGateWSBaseURL   = "wss://fx-ws.gateio.ws/v4/ws/usdt"
+	defaultGateRESTBaseURL = "https://fx-api.gateio.ws"
 	// Gate.io Spot
-	defaultGateSpotWSBaseURL  = "wss://api.gateio.ws/ws/v4/"
+	defaultGateSpotWSBaseURL   = "wss://api.gateio.ws/ws/v4/"
 	defaultGateSpotRESTBaseURL = "https://api.gateio.ws"
+	// OKX (REST host serves both panels; WS is public v5)
+	defaultOKXRESTBaseURL = "https://www.okx.com"
+	defaultOKXWSBaseURL   = "wss://ws.okx.com:8443/ws/v5/public"
 
-	defaultTimeout            = 8 * time.Second
-	userDataKeepaliveInterval = 50 * time.Minute
-	uiRefreshInterval         = time.Second
-	defaultChartLimit         = 48
-	defaultChartHeight        = 12
-	chartCandleWidth          = 1
-	chartCandleGap            = 1
-	chartStride               = chartCandleWidth + chartCandleGap
-	bullColorTag              = "#00c853"
-	bearColorTag              = "#e53935"
-	neutralColorTag           = "#9aa0a6"
-	orderBookLimit            = 20
-	orderBookRefreshInterval  = time.Second
-	defaultChartInterval      = "1h"
-	sparklineHistory          = 20
+	defaultTimeout             = 8 * time.Second
+	userDataKeepaliveInterval  = 50 * time.Minute
+	uiRefreshInterval          = time.Second
+	defaultChartLimit          = 48
+	defaultChartHeight         = 12
+	chartCandleWidth           = 1
+	chartCandleGap             = 1
+	chartStride                = chartCandleWidth + chartCandleGap
+	bullColorTag               = "#00c853"
+	bearColorTag               = "#e53935"
+	neutralColorTag            = "#9aa0a6"
+	orderBookLimit             = 20
+	orderBookRefreshInterval   = time.Second
+	defaultChartInterval       = "1h"
+	sparklineHistory           = 20
 	fundingRateRefreshInterval = 60 * time.Second
 	marketStatsRefreshInterval = 30 * time.Second
-	defaultVolumeHeight       = 4
+	defaultVolumeHeight        = 4
 )
 
 var chartIntervals = []string{"1h", "2h", "4h", "1d", "3d"}
 
 func spotRESTBaseURL(cfg config) string {
-	if cfg.isGate() {
+	switch {
+	case cfg.isGate():
 		return defaultGateSpotRESTBaseURL
+	case cfg.isOKX():
+		return defaultOKXRESTBaseURL
+	default:
+		return defaultSpotRESTBaseURL
 	}
-	return defaultSpotRESTBaseURL
 }
 
 func spotWSBaseURL(cfg config) string {
-	if cfg.isGate() {
+	switch {
+	case cfg.isGate():
 		return defaultGateSpotWSBaseURL
+	case cfg.isOKX():
+		return defaultOKXWSBaseURL
+	default:
+		return defaultSpotWSBaseURL
 	}
-	return defaultSpotWSBaseURL
 }
 
 func main() {
@@ -249,22 +260,29 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 	}()
 
 	if len(cfg.Symbols) > 0 {
-		if cfg.isGate() {
+		switch {
+		case cfg.isGate():
 			go runGateFundingRateLoop(ctx, client, cfg, state, ui.requestDraw)
 			go runGateMarketStatsLoop(ctx, client, cfg, state, ui.requestDraw)
-		} else {
+		case cfg.isOKX():
+			go runOKXFundingRateLoop(ctx, client, cfg, state, ui.requestDraw)
+			go runOKXMarketStatsLoop(ctx, client, cfg, state, ui.requestDraw)
+		default:
 			go runFundingRateLoop(ctx, client, cfg, state, ui.requestDraw)
 			go runMarketStatsLoop(ctx, client, cfg, state, ui.requestDraw)
 		}
 	}
 	if cfg.hasAccountAuth() && len(cfg.Symbols) > 0 {
-		if cfg.isGate() {
+		switch {
+		case cfg.isGate():
 			go runGatePositionsLoop(ctx, client, cfg, state, ui.requestDraw)
-		} else {
+		case cfg.isOKX():
+			go runOKXPositionsLoop(ctx, client, cfg, state, ui.requestDraw)
+		default:
 			go runUserDataLoop(ctx, client, cfg, state, ui.requestDraw)
 		}
 	}
-	if cfg.hasAccountAuth() && cfg.hasSpot() && !cfg.isGate() {
+	if cfg.hasAccountAuth() && cfg.hasSpot() && !cfg.isGate() && !cfg.isOKX() {
 		go runSpotUserDataLoop(ctx, client, cfg, state, ui.requestDraw)
 	}
 	if cfg.hasSpot() {

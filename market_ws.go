@@ -18,32 +18,36 @@ var (
 )
 
 func runWSLoop(ctx context.Context, cfg config, state *appState, notify func(), getChartSymbol func() string, getChartInterval func() string, getTickerSymbols func() []string, isSpotChartSymbol func(string) bool) error {
-	if cfg.isGate() {
+	switch {
+	case cfg.isGate():
 		return runGateWSLoop(ctx, cfg, state, notify, getChartSymbol, getChartInterval, getTickerSymbols, isSpotChartSymbol)
-	}
-	for {
-		if ctx.Err() != nil {
-			return nil
-		}
+	case cfg.isOKX():
+		return runOKXWSLoop(ctx, cfg, state, notify, getChartSymbol, getChartInterval, getTickerSymbols, isSpotChartSymbol)
+	default:
+		for {
+			if ctx.Err() != nil {
+				return nil
+			}
 
-		state.setError("connecting websocket...")
-		notify()
+			state.setError("connecting websocket...")
+			notify()
 
-		err := consumeWS(ctx, cfg, state, notify, getChartSymbol, getChartInterval, getTickerSymbols, isSpotChartSymbol)
-		if err == nil || ctx.Err() != nil {
-			return nil
-		}
-		if errors.Is(err, errResubscribe) {
-			continue
-		}
+			err := consumeWS(ctx, cfg, state, notify, getChartSymbol, getChartInterval, getTickerSymbols, isSpotChartSymbol)
+			if err == nil || ctx.Err() != nil {
+				return nil
+			}
+			if errors.Is(err, errResubscribe) {
+				continue
+			}
 
-		state.setError(fmt.Sprintf("websocket disconnected: %v | retry in %s", err, cfg.RetryDelay))
-		notify()
+			state.setError(fmt.Sprintf("websocket disconnected: %v | retry in %s", err, cfg.RetryDelay))
+			notify()
 
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(cfg.RetryDelay):
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(cfg.RetryDelay):
+			}
 		}
 	}
 }
@@ -146,6 +150,9 @@ func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), 
 func runSpotWSLoop(ctx context.Context, cfg config, state *appState, notify func(), getSpotTickerSymbols func() []string, wsBase string) error {
 	if cfg.isGate() {
 		return runGateSpotWSLoop(ctx, cfg, state, notify, getSpotTickerSymbols, wsBase)
+	}
+	if cfg.isOKX() {
+		return runOKXSpotWSLoop(ctx, cfg, state, notify, getSpotTickerSymbols, wsBase)
 	}
 	for {
 		if ctx.Err() != nil {

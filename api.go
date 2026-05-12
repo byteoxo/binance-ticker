@@ -210,9 +210,12 @@ func loadChartHistory(ctx context.Context, client *http.Client, cfg config, stat
 func loadInitialPositions(ctx context.Context, client *http.Client, cfg config, state *appState) error {
 	var positions []positionState
 	var err error
-	if cfg.isGate() {
+	switch {
+	case cfg.isGate():
 		positions, err = fetchGatePositions(ctx, client, cfg)
-	} else {
+	case cfg.isOKX():
+		positions, err = fetchOKXPositions(ctx, client, cfg)
+	default:
 		positions, err = fetchPositions(ctx, client, cfg)
 	}
 	if err != nil {
@@ -354,6 +357,9 @@ func fetchSpotBalances(ctx context.Context, client *http.Client, cfg config) ([]
 	if !cfg.hasAccountAuth() {
 		return nil, nil
 	}
+	if cfg.isOKX() {
+		return fetchOKXSpotBalances(ctx, client, cfg)
+	}
 	query := url.Values{}
 	query.Set("timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
 	query.Set("recvWindow", strconv.FormatInt(int64(cfg.Timeout/time.Millisecond), 10))
@@ -439,6 +445,9 @@ func fetchKlines(ctx context.Context, client *http.Client, baseURL, symbol, inte
 	// Route to Gate.io if the base URL is a Gate.io endpoint.
 	if isGateBaseURL(baseURL) {
 		return fetchKlinesGate(ctx, client, baseURL, symbol, interval, limit, panel)
+	}
+	if isOKXBaseURL(baseURL) {
+		return fetchKlinesOKX(ctx, client, baseURL, symbol, interval, limit, panel)
 	}
 
 	endpoint, err := buildKlineURL(baseURL, symbol, interval, limit)

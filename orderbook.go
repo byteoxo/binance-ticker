@@ -25,6 +25,9 @@ func fetchOrderBook(ctx context.Context, baseURL, symbol string, panel panelMode
 	if isGateBaseURL(baseURL) {
 		return fetchOrderBookGate(ctx, baseURL, symbol, panel)
 	}
+	if isOKXBaseURL(baseURL) {
+		return fetchOrderBookOKX(ctx, baseURL, symbol, panel)
+	}
 
 	parsed, err := url.Parse(baseURL)
 	if err != nil {

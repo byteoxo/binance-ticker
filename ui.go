@@ -12,29 +12,29 @@ import (
 )
 
 type uiModel struct {
-	app              *tview.Application
-	pages            *tview.Pages
-	header           *tview.TextView
-	status           *tview.TextView
-	table            *tview.Table
-	positions        *tview.Table
-	chart            *tview.TextView
-	footer           *tview.TextView
-	help             tview.Primitive
-	cfg              config
-	loc              *time.Location
-	state            *appState
-	changeChart      func(int)
-	changeInterval   func()
-	helpOpen         bool
-	orderBook        tview.Primitive
-	orderBookFrame   *tview.Frame
-	orderBookTable   *tview.Table
-	orderBookOpen    bool
-	orderBookCancel  context.CancelFunc
-	orderBookSymbol  string
-	orderBookBaseURL string
-	orderBookPanel   panelMode
+	app                  *tview.Application
+	pages                *tview.Pages
+	header               *tview.TextView
+	status               *tview.TextView
+	table                *tview.Table
+	positions            *tview.Table
+	chart                *tview.TextView
+	footer               *tview.TextView
+	help                 tview.Primitive
+	cfg                  config
+	loc                  *time.Location
+	state                *appState
+	changeChart          func(int)
+	changeInterval       func()
+	helpOpen             bool
+	orderBook            tview.Primitive
+	orderBookFrame       *tview.Frame
+	orderBookTable       *tview.Table
+	orderBookOpen        bool
+	orderBookCancel      context.CancelFunc
+	orderBookSymbol      string
+	orderBookBaseURL     string
+	orderBookPanel       panelMode
 	openOrders           tview.Primitive
 	openOrdersFrame      *tview.Frame
 	openOrdersTable      *tview.Table
@@ -311,7 +311,8 @@ func (ui *uiModel) togglePanel() {
 		}
 		ui.state.setPanel(panelSpot)
 		if chartSymbol := getChartSymbolForPanel(ui.state, panelSpot); chartSymbol != "" {
-			_ = loadChartHistoryForSymbol(context.Background(), &http.Client{Timeout: ui.cfg.Timeout}, defaultSpotRESTBaseURL, panelSpot, chartSymbol, ui.cfg.ChartLimit, ui.state)
+			spotBase := spotRESTBaseURL(ui.cfg)
+			_ = loadChartHistoryForSymbol(context.Background(), &http.Client{Timeout: ui.cfg.Timeout}, spotBase, panelSpot, chartSymbol, ui.cfg.ChartLimit, ui.state)
 		}
 	case panelSpot:
 		if len(ui.cfg.Symbols) == 0 {
