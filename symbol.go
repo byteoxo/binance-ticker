@@ -7,6 +7,9 @@ func spotSymbolToTicker(asset string) string {
 	if asset == "" || asset == "USDT" {
 		return ""
 	}
+	if strings.HasSuffix(asset, "USDT") && len(asset) > len("USDT") {
+		return asset
+	}
 	return asset + "USDT"
 }
 

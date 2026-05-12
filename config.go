@@ -12,42 +12,50 @@ import (
 )
 
 type config struct {
-	Exchange     string
-	Symbols      []string
-	SpotSymbols  []string
-	ChartSymbol  string
-	ChartLimit   int
-	DefaultPanel string
-	Timeout      time.Duration
-	TZ           string
-	RESTBase     string
-	WSBase       string
-	NoColor      bool
-	RetryDelay   time.Duration
-	APIKey       string
-	APISecret    string
-	ConfigPath   string
+	Exchange      string
+	Symbols       []string
+	SpotSymbols   []string
+	ChartSymbol   string
+	ChartLimit    int
+	DefaultPanel  string
+	Timeout       time.Duration
+	TZ            string
+	RESTBase      string
+	WSBase        string
+	NoColor       bool
+	RetryDelay    time.Duration
+	APIKey        string
+	APISecret     string
+	APIPassphrase string
+	ConfigPath    string
 }
 
 type rawConfig struct {
-	Exchange     string   `toml:"exchange"`
-	Symbols      []string `toml:"symbols"`
-	SpotSymbols  []string `toml:"spot_symbols"`
-	ChartSymbol  string   `toml:"chart_symbol"`
-	ChartLimit   int      `toml:"chart_limit"`
-	DefaultPanel string   `toml:"default_panel"`
-	Timeout      string   `toml:"timeout"`
-	TZ           string   `toml:"tz"`
-	RESTBase     string   `toml:"rest_base"`
-	WSBase       string   `toml:"ws_base"`
-	NoColor      bool     `toml:"no_color"`
-	RetryDelay   string   `toml:"retry_delay"`
-	APIKey       string   `toml:"api_key"`
-	APISecret    string   `toml:"api_secret"`
+	Exchange      string   `toml:"exchange"`
+	Symbols       []string `toml:"symbols"`
+	SpotSymbols   []string `toml:"spot_symbols"`
+	ChartSymbol   string   `toml:"chart_symbol"`
+	ChartLimit    int      `toml:"chart_limit"`
+	DefaultPanel  string   `toml:"default_panel"`
+	Timeout       string   `toml:"timeout"`
+	TZ            string   `toml:"tz"`
+	RESTBase      string   `toml:"rest_base"`
+	WSBase        string   `toml:"ws_base"`
+	NoColor       bool     `toml:"no_color"`
+	RetryDelay    string   `toml:"retry_delay"`
+	APIKey        string   `toml:"api_key"`
+	APISecret     string   `toml:"api_secret"`
+	APIPassphrase string   `toml:"api_passphrase"`
 }
 
 func (cfg config) hasAccountAuth() bool {
-	return cfg.APIKey != "" && cfg.APISecret != ""
+	if cfg.APIKey == "" || cfg.APISecret == "" {
+		return false
+	}
+	if cfg.isOKX() && strings.TrimSpace(cfg.APIPassphrase) == "" {
+		return false
+	}
+	return true
 }
 
 func (cfg config) hasSpot() bool {
@@ -58,18 +66,30 @@ func (cfg config) isGate() bool {
 	return cfg.Exchange == "gate"
 }
 
+func (cfg config) isOKX() bool {
+	return cfg.Exchange == "okx"
+}
+
 func envAPIKeyName(exchange string) string {
-	if exchange == "gate" {
+	switch exchange {
+	case "gate":
 		return "GATE_API_KEY"
+	case "okx":
+		return "OKX_API_KEY"
+	default:
+		return "BINANCE_API_KEY"
 	}
-	return "BINANCE_API_KEY"
 }
 
 func envAPISecretName(exchange string) string {
-	if exchange == "gate" {
+	switch exchange {
+	case "gate":
 		return "GATE_API_SECRET"
+	case "okx":
+		return "OKX_API_SECRET"
+	default:
+		return "BINANCE_API_SECRET"
 	}
-	return "BINANCE_API_SECRET"
 }
 
 // exchangeDefaults returns (restBase, wsBase) defaults for futures panel.
@@ -77,6 +97,8 @@ func exchangeDefaults(exchange string) (string, string) {
 	switch exchange {
 	case "gate":
 		return defaultGateRESTBaseURL, defaultGateWSBaseURL
+	case "okx":
+		return defaultOKXRESTBaseURL, defaultOKXWSBaseURL
 	default:
 		return defaultRESTBaseURL, defaultWSBaseURL
 	}
@@ -113,17 +135,53 @@ func loadConfig() (config, error) {
 	if exchange == "" {
 		exchange = "binance"
 	}
-	if exchange != "binance" && exchange != "gate" {
-		return config{}, fmt.Errorf("config %s field %q must be one of %q or %q", path, "exchange", "binance", "gate")
+	if exchange != "binance" && exchange != "gate" && exchange != "okx" {
+		return config{}, fmt.Errorf("config %s field %q must be one of %q, %q, or %q", path, "exchange", "binance", "gate", "okx")
 	}
 
 	symbols := normalizeSymbols(strings.Join(raw.Symbols, ","))
 	spotSymbols := normalizeSymbols(strings.Join(raw.SpotSymbols, ","))
+	if exchange == "binance" {
+		for i := range symbols {
+			symbols[i] = strings.ReplaceAll(symbols[i], "_", "")
+		}
+		for i := range spotSymbols {
+			spotSymbols[i] = strings.ReplaceAll(spotSymbols[i], "_", "")
+		}
+	}
+	if exchange == "okx" {
+		for i, rawSym := range symbols {
+			c := okxCompactFromInstID(rawSym)
+			if c == "" {
+				return config{}, fmt.Errorf("config %s exchange okx: invalid futures instrument %q in symbols", path, rawSym)
+			}
+			symbols[i] = c
+		}
+		for i, rawSym := range spotSymbols {
+			c := okxCompactFromInstID(rawSym)
+			if c == "" {
+				return config{}, fmt.Errorf("config %s exchange okx: invalid spot instrument %q in spot_symbols", path, rawSym)
+			}
+			spotSymbols[i] = c
+		}
+		symbols = normalizeSymbolList(symbols)
+		spotSymbols = normalizeSymbolList(spotSymbols)
+	}
 	if len(symbols) == 0 && len(spotSymbols) == 0 {
 		return config{}, fmt.Errorf("config %s must define at least one of %q or %q", path, "symbols", "spot_symbols")
 	}
 
 	chartSymbol := strings.ToUpper(strings.TrimSpace(raw.ChartSymbol))
+	if chartSymbol != "" && exchange == "binance" {
+		chartSymbol = strings.ReplaceAll(chartSymbol, "_", "")
+	}
+	if chartSymbol != "" && exchange == "okx" {
+		c := okxCompactFromInstID(chartSymbol)
+		if c == "" {
+			return config{}, fmt.Errorf("config %s exchange okx: invalid chart_symbol %q (use OKX instrument ids, e.g. BTC-USDT-SWAP)", path, strings.TrimSpace(raw.ChartSymbol))
+		}
+		chartSymbol = c
+	}
 	if chartSymbol == "" && len(symbols) > 0 {
 		return config{}, fmt.Errorf("config %s field %q cannot be empty when futures symbols are configured", path, "chart_symbol")
 	}
@@ -151,16 +209,28 @@ func loadConfig() (config, error) {
 
 	apiKey := strings.TrimSpace(raw.APIKey)
 	apiSecret := strings.TrimSpace(raw.APISecret)
+	apiPassphrase := strings.TrimSpace(raw.APIPassphrase)
 	// Environment variables override config file values.
 	// Binance: BINANCE_API_KEY / BINANCE_API_SECRET
 	// Gate.io: GATE_API_KEY   / GATE_API_SECRET
+	// OKX:     OKX_API_KEY    / OKX_API_SECRET / OKX_API_PASSPHRASE
 	if v := os.Getenv(envAPIKeyName(exchange)); v != "" {
 		apiKey = v
 	}
 	if v := os.Getenv(envAPISecretName(exchange)); v != "" {
 		apiSecret = v
 	}
-	if (apiKey == "") != (apiSecret == "") {
+	if exchange == "okx" && os.Getenv("OKX_API_PASSPHRASE") != "" {
+		apiPassphrase = strings.TrimSpace(os.Getenv("OKX_API_PASSPHRASE"))
+	}
+
+	authIncompletePair := (apiKey == "") != (apiSecret == "")
+	if exchange == "okx" {
+		hasAnyAuth := apiKey != "" || apiSecret != "" || apiPassphrase != ""
+		if hasAnyAuth && (apiKey == "" || apiSecret == "" || apiPassphrase == "") {
+			return config{}, fmt.Errorf("config %s exchange okx requires %q, %q, and %q together when using account auth", path, "api_key", "api_secret", "api_passphrase")
+		}
+	} else if authIncompletePair {
 		return config{}, fmt.Errorf("config %s requires both %q and %q when account auth is enabled", path, "api_key", "api_secret")
 	}
 
@@ -188,21 +258,22 @@ func loadConfig() (config, error) {
 	}
 
 	return config{
-		Exchange:     exchange,
-		Symbols:      symbols,
-		SpotSymbols:  spotSymbols,
-		ChartSymbol:  chartSymbol,
-		ChartLimit:   chartLimit,
-		DefaultPanel: string(defaultPanel),
-		Timeout:      timeout,
-		TZ:           tz,
-		RESTBase:     restBase,
-		WSBase:       wsBase,
-		NoColor:      raw.NoColor || os.Getenv("NO_COLOR") != "",
-		RetryDelay:   retryDelay,
-		APIKey:       apiKey,
-		APISecret:    apiSecret,
-		ConfigPath:   path,
+		Exchange:      exchange,
+		Symbols:       symbols,
+		SpotSymbols:   spotSymbols,
+		ChartSymbol:   chartSymbol,
+		ChartLimit:    chartLimit,
+		DefaultPanel:  string(defaultPanel),
+		Timeout:       timeout,
+		TZ:            tz,
+		RESTBase:      restBase,
+		WSBase:        wsBase,
+		NoColor:       raw.NoColor || os.Getenv("NO_COLOR") != "",
+		RetryDelay:    retryDelay,
+		APIKey:        apiKey,
+		APISecret:     apiSecret,
+		APIPassphrase: apiPassphrase,
+		ConfigPath:    path,
 	}, nil
 }
 
