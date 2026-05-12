@@ -125,7 +125,12 @@ func consumeOKXWS(ctx context.Context, cfg config, state *appState, notify func(
 
 	pubArgs := make([]map[string]string, 0)
 	for _, sym := range getTickerSymbols() {
-		pubArgs = append(pubArgs, map[string]string{"channel": "tickers", "instId": okxSwapInstID(sym)})
+		inst := okxSwapInstID(sym)
+		pubArgs = append(pubArgs,
+			map[string]string{"channel": "tickers", "instId": inst},
+			map[string]string{"channel": "funding-rate", "instId": inst},
+			map[string]string{"channel": "open-interest", "instId": inst},
+		)
 	}
 	if err := connPub.WriteJSON(map[string]interface{}{"op": "subscribe", "args": pubArgs}); err != nil {
 		return fmt.Errorf("okx subscribe tickers: %w", err)
@@ -204,6 +209,80 @@ func consumeOKXWS(ctx context.Context, cfg config, state *appState, notify func(
 	}
 }
 
+type okxWSFundingPushRow struct {
+	InstID          string `json:"instId"`
+	FundingRate     string `json:"fundingRate"`
+	NextFundingTime string `json:"nextFundingTime"`
+	MarkPx          string `json:"markPx"`
+	IdxPx           string `json:"idxPx"`
+}
+
+type okxWSOpenInterestPushRow struct {
+	InstID string `json:"instId"`
+	Oi     string `json:"oi"`
+	Ts     string `json:"ts"`
+}
+
+func okxFundingRatesFromWSData(raw json.RawMessage) ([]fundingRate, error) {
+	var rows []okxWSFundingPushRow
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		var single okxWSFundingPushRow
+		if err := json.Unmarshal(raw, &single); err != nil {
+			return nil, err
+		}
+		if single.InstID == "" {
+			return nil, fmt.Errorf("okx funding-rate: empty instId")
+		}
+		rows = []okxWSFundingPushRow{single}
+	}
+	out := make([]fundingRate, 0, len(rows))
+	for _, r := range rows {
+		mark, _ := strconv.ParseFloat(r.MarkPx, 64)
+		index, _ := strconv.ParseFloat(r.IdxPx, 64)
+		rate, _ := strconv.ParseFloat(r.FundingRate, 64)
+		nextMs, _ := strconv.ParseInt(r.NextFundingTime, 10, 64)
+		out = append(out, fundingRate{
+			Symbol:          okxCompactFromInstID(r.InstID),
+			MarkPrice:       mark,
+			IndexPrice:      index,
+			LastFundingRate: rate,
+			NextFundingTime: nextMs,
+		})
+	}
+	return out, nil
+}
+
+func okxOpenInterestFromWSData(raw json.RawMessage) ([]openInterestData, error) {
+	var rows []okxWSOpenInterestPushRow
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		var single okxWSOpenInterestPushRow
+		if err := json.Unmarshal(raw, &single); err != nil {
+			return nil, err
+		}
+		if single.InstID == "" {
+			return nil, fmt.Errorf("okx open-interest: empty instId")
+		}
+		rows = []okxWSOpenInterestPushRow{single}
+	}
+	out := make([]openInterestData, 0, len(rows))
+	for _, r := range rows {
+		oi, _ := strconv.ParseFloat(r.Oi, 64)
+		ts, _ := strconv.ParseInt(r.Ts, 10, 64)
+		out = append(out, openInterestData{
+			Symbol:       okxCompactFromInstID(r.InstID),
+			OpenInterest: oi,
+			Time:         ts,
+		})
+	}
+	return out, nil
+}
+
 func okxReadTickerConn(conn *websocket.Conn, readErrCh chan<- error, state *appState, notify func(), timeout time.Duration) {
 	for {
 		raw, err := okxReadNextJSON(conn, timeout)
@@ -236,27 +315,49 @@ func okxReadTickerConn(conn *websocket.Conn, readErrCh chan<- error, state *appS
 		if err := json.Unmarshal(env.Arg, &arg); err != nil || arg.Channel == "" {
 			continue
 		}
-		if arg.Channel != "tickers" {
+		switch arg.Channel {
+		case "tickers":
+			var rows []struct {
+				InstID   string `json:"instId"`
+				Last     string `json:"last"`
+				Open24h  string `json:"open24h"`
+				High24h  string `json:"high24h"`
+				Low24h   string `json:"low24h"`
+				Vol24h   string `json:"vol24h"`
+				VolCcy24 string `json:"volCcy24h"`
+			}
+			if err := json.Unmarshal(env.Data, &rows); err != nil {
+				readErrCh <- fmt.Errorf("decode okx tickers: %w", err)
+				return
+			}
+			for _, row := range rows {
+				ticker := okxWSTickerRowToPrice(row)
+				state.applyTicker(ticker)
+			}
+			notify()
+		case "funding-rate":
+			rates, err := okxFundingRatesFromWSData(env.Data)
+			if err != nil {
+				readErrCh <- fmt.Errorf("decode okx funding-rate: %w", err)
+				return
+			}
+			if len(rates) > 0 {
+				state.setFundingRates(rates)
+				notify()
+			}
+		case "open-interest":
+			ois, err := okxOpenInterestFromWSData(env.Data)
+			if err != nil {
+				readErrCh <- fmt.Errorf("decode okx open-interest: %w", err)
+				return
+			}
+			for _, oi := range ois {
+				state.setOpenInterest(oi)
+			}
+			notify()
+		default:
 			continue
 		}
-		var rows []struct {
-			InstID   string `json:"instId"`
-			Last     string `json:"last"`
-			Open24h  string `json:"open24h"`
-			High24h  string `json:"high24h"`
-			Low24h   string `json:"low24h"`
-			Vol24h   string `json:"vol24h"`
-			VolCcy24 string `json:"volCcy24h"`
-		}
-		if err := json.Unmarshal(env.Data, &rows); err != nil {
-			readErrCh <- fmt.Errorf("decode okx tickers: %w", err)
-			return
-		}
-		for _, row := range rows {
-			ticker := okxWSTickerRowToPrice(row)
-			state.applyTicker(ticker)
-		}
-		notify()
 	}
 }
 

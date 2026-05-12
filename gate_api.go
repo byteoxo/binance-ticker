@@ -265,78 +265,9 @@ func parseGateFuturesOrderBook(body []byte) (orderBookResponse, error) {
 
 // ── Gate.io Funding Rate ──────────────────────────────────────────────────────
 //
-// GET /api/v4/futures/usdt/contracts/{contract}
-// Returns contract info including mark_price, index_price, funding_rate,
-// funding_next_apply (unix seconds of next settlement).
-
-func runGateFundingRateLoop(ctx context.Context, client *http.Client, cfg config, state *appState, notify func()) {
-	fetch := func() {
-		rates, err := fetchGateFundingRates(ctx, client, cfg.RESTBase, cfg.Symbols)
-		if err != nil {
-			return
-		}
-		state.setFundingRates(rates)
-		notify()
-	}
-	fetch()
-	ticker := time.NewTicker(fundingRateRefreshInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			fetch()
-		}
-	}
-}
-
-func fetchGateFundingRates(ctx context.Context, client *http.Client, baseURL string, symbols []string) ([]fundingRate, error) {
-	rates := make([]fundingRate, 0, len(symbols))
-	for _, symbol := range symbols {
-		parsed, err := url.Parse(baseURL)
-		if err != nil {
-			continue
-		}
-		parsed.Path = "/api/v4/futures/usdt/contracts/" + symbol
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
-		if err != nil {
-			continue
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			continue
-		}
-
-		var payload struct {
-			Name            string `json:"name"`
-			MarkPrice       string `json:"mark_price"`
-			IndexPrice      string `json:"index_price"`
-			FundingRate     string `json:"funding_rate"`
-			FundingNextApply float64 `json:"funding_next_apply"` // unix seconds
-		}
-		if err := json.Unmarshal(body, &payload); err != nil {
-			continue
-		}
-		mark, _ := strconv.ParseFloat(payload.MarkPrice, 64)
-		index, _ := strconv.ParseFloat(payload.IndexPrice, 64)
-		rate, _ := strconv.ParseFloat(payload.FundingRate, 64)
-		rates = append(rates, fundingRate{
-			Symbol:          payload.Name,
-			MarkPrice:       mark,
-			IndexPrice:      index,
-			LastFundingRate: rate,
-			NextFundingTime: int64(payload.FundingNextApply) * 1000, // to ms
-		})
-	}
-	return rates, nil
-}
+// Mark/index prices and funding are merged from futures.tickers WebSocket pushes
+// (gateFundingFromTicker in gate_ws.go).
+//
 
 // ── Gate.io Market Stats (OI + L/S Ratio) ────────────────────────────────────
 //

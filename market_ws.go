@@ -80,6 +80,7 @@ func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), 
 	resubscribeTicker := time.NewTicker(time.Second)
 	defer resubscribeTicker.Stop()
 	klineStreamSuffix := "@kline_" + chartInterval
+	klineSuffixLC := strings.ToLower(klineStreamSuffix)
 	baselineSymbols := strings.Join(getTickerSymbols(), ",") + "|" + chartSymbol + "|" + chartInterval
 
 	readErrCh := make(chan error, 1)
@@ -92,8 +93,9 @@ func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), 
 				return
 			}
 
+			streamLC := strings.ToLower(envelope.Stream)
 			switch {
-			case strings.HasSuffix(envelope.Stream, "@ticker"):
+			case strings.HasSuffix(streamLC, "@ticker"):
 				ticker, err := parseWSTicker(envelope.Data)
 				if err != nil {
 					readErrCh <- fmt.Errorf("decode websocket ticker payload: %w", err)
@@ -101,7 +103,23 @@ func consumeWS(ctx context.Context, cfg config, state *appState, notify func(), 
 				}
 				state.applyTicker(ticker)
 				notify()
-			case strings.HasSuffix(envelope.Stream, klineStreamSuffix):
+			case strings.Contains(streamLC, "@markprice"):
+				fr, err := parseWSMarkPriceFunding(envelope.Data)
+				if err != nil {
+					readErrCh <- fmt.Errorf("decode websocket mark price payload: %w", err)
+					return
+				}
+				state.setFundingRates([]fundingRate{fr})
+				notify()
+			case strings.Contains(streamLC, "@openinterest"):
+				oi, err := parseWSOpenInterest(envelope.Data)
+				if err != nil {
+					readErrCh <- fmt.Errorf("decode websocket open interest payload: %w", err)
+					return
+				}
+				state.setOpenInterest(oi)
+				notify()
+			case strings.HasSuffix(streamLC, klineSuffixLC):
 				candle, err := parseWSKline(envelope.Data)
 				if err != nil {
 					readErrCh <- fmt.Errorf("decode websocket kline payload: %w", err)
@@ -350,11 +368,66 @@ func parseWSKline(data []byte) (klineCandle, error) {
 	)
 }
 
+func parseWSMarkPriceFunding(data []byte) (fundingRate, error) {
+	var p struct {
+		Event           string            `json:"e"`
+		Symbol          string            `json:"s"`
+		MarkPrice       string            `json:"p"`
+		IndexPrice      string            `json:"i"`
+		FundingRate     string            `json:"r"`
+		NextFundingTime jsonFlexibleInt64 `json:"T"`
+	}
+	if err := json.Unmarshal(data, &p); err != nil {
+		return fundingRate{}, err
+	}
+	if p.Symbol == "" {
+		return fundingRate{}, fmt.Errorf("mark price: missing symbol")
+	}
+	if p.Event != "" && p.Event != "markPriceUpdate" {
+		return fundingRate{}, fmt.Errorf("mark price: unexpected event %s", p.Event)
+	}
+	mark, _ := strconv.ParseFloat(p.MarkPrice, 64)
+	index, _ := strconv.ParseFloat(p.IndexPrice, 64)
+	rate, _ := strconv.ParseFloat(p.FundingRate, 64)
+	return fundingRate{
+		Symbol:          p.Symbol,
+		MarkPrice:       mark,
+		IndexPrice:      index,
+		LastFundingRate: rate,
+		NextFundingTime: int64(p.NextFundingTime),
+	}, nil
+}
+
+func parseWSOpenInterest(data []byte) (openInterestData, error) {
+	var p struct {
+		Event        string            `json:"e"`
+		Symbol       string            `json:"s"`
+		OpenInterest string            `json:"o"`
+		EventTime    jsonFlexibleInt64 `json:"E"`
+	}
+	if err := json.Unmarshal(data, &p); err != nil {
+		return openInterestData{}, err
+	}
+	if p.Symbol == "" {
+		return openInterestData{}, fmt.Errorf("open interest: missing symbol")
+	}
+	if p.Event != "" && p.Event != "openInterest" {
+		return openInterestData{}, fmt.Errorf("open interest: unexpected event %s", p.Event)
+	}
+	oi, _ := strconv.ParseFloat(p.OpenInterest, 64)
+	return openInterestData{
+		Symbol:       p.Symbol,
+		OpenInterest: oi,
+		Time:         int64(p.EventTime),
+	}, nil
+}
+
 func buildWSURL(baseURL string, symbols []string, chartSymbol, chartInterval string) string {
 	symbols = normalizeSymbolList(symbols)
-	streams := make([]string, 0, len(symbols)+1)
+	streams := make([]string, 0, len(symbols)*3+1)
 	for _, symbol := range symbols {
-		streams = append(streams, strings.ToLower(symbol)+"@ticker")
+		lsym := strings.ToLower(symbol)
+		streams = append(streams, lsym+"@ticker", lsym+"@markPrice@1s", lsym+"@openInterest")
 	}
 	if chartSymbol != "" {
 		if chartInterval == "" {

@@ -39,48 +39,50 @@ type gateWSError struct {
 
 // Gate.io futures ticker payload (inside result array)
 type gateFuturesTicker struct {
-	Contract       string `json:"contract"`
-	Last           string `json:"last"`
-	ChangePercentage string `json:"change_percentage"`
-	High24H        string `json:"high_24h"`
-	Low24H         string `json:"low_24h"`
-	Volume24H      string `json:"volume_24h"`     // contracts
-	Volume24HUSDT  string `json:"volume_24h_settle"` // settle currency volume
-	IndexPrice     string `json:"index_price"`
-	MarkPrice      string `json:"mark_price"`
+	Contract         string  `json:"contract"`
+	Last             string  `json:"last"`
+	ChangePercentage string  `json:"change_percentage"`
+	High24H          string  `json:"high_24h"`
+	Low24H           string  `json:"low_24h"`
+	Volume24H        string  `json:"volume_24h"`        // contracts
+	Volume24HUSDT    string  `json:"volume_24h_settle"` // settle currency volume
+	IndexPrice       string  `json:"index_price"`
+	MarkPrice        string  `json:"mark_price"`
+	FundingRate      string  `json:"funding_rate"`
+	FundingNextApply float64 `json:"funding_next_apply"` // unix seconds (next settlement)
 }
 
 // Gate.io spot ticker payload
 type gateSpotTicker struct {
-	CurrencyPair    string `json:"currency_pair"`
-	Last            string `json:"last"`
+	CurrencyPair     string `json:"currency_pair"`
+	Last             string `json:"last"`
 	ChangePercentage string `json:"change_percentage"`
-	High24H         string `json:"high_24h"`
-	Low24H          string `json:"low_24h"`
-	BaseVolume      string `json:"base_volume"`
-	QuoteVolume     string `json:"quote_volume"`
+	High24H          string `json:"high_24h"`
+	Low24H           string `json:"low_24h"`
+	BaseVolume       string `json:"base_volume"`
+	QuoteVolume      string `json:"quote_volume"`
 }
 
 // Gate.io futures candlestick payload
 type gateFuturesKline struct {
-	T  int64  `json:"t"`  // unix seconds
-	O  string `json:"o"`
-	H  string `json:"h"`
-	L  string `json:"l"`
-	C  string `json:"c"`
-	V  int64  `json:"v"`  // contracts volume
-	N  string `json:"n"`  // contract name
+	T int64  `json:"t"` // unix seconds
+	O string `json:"o"`
+	H string `json:"h"`
+	L string `json:"l"`
+	C string `json:"c"`
+	V int64  `json:"v"` // contracts volume
+	N string `json:"n"` // contract name
 }
 
 // Gate.io spot candlestick inside result
 type gateSpotKline struct {
-	T  int64  `json:"t"`  // unix seconds
-	O  string `json:"o"`
-	H  string `json:"h"`
-	L  string `json:"l"`
-	C  string `json:"c"`
-	V  string `json:"v"`  // base volume
-	N  string `json:"n"`  // currency pair
+	T int64  `json:"t"` // unix seconds
+	O string `json:"o"`
+	H string `json:"h"`
+	L string `json:"l"`
+	C string `json:"c"`
+	V string `json:"v"` // base volume
+	N string `json:"n"` // currency pair
 }
 
 func runGateWSLoop(ctx context.Context, cfg config, state *appState, notify func(), getChartSymbol func() string, getChartInterval func() string, getTickerSymbols func() []string, isSpotChartSymbol func(string) bool) error {
@@ -180,6 +182,9 @@ func consumeGateWS(ctx context.Context, cfg config, state *appState, notify func
 				for _, t := range tickers {
 					ticker := gateTickerToPrice(t)
 					state.applyTicker(ticker)
+					if fr, ok := gateFundingFromTicker(t); ok {
+						state.setFundingRates([]fundingRate{fr})
+					}
 				}
 				notify()
 			case "futures.candlesticks":
@@ -401,6 +406,22 @@ func gateSubscribe(conn *websocket.Conn, channel string, symbols []string, inter
 		"payload": payload,
 	}
 	return conn.WriteJSON(msg)
+}
+
+func gateFundingFromTicker(t gateFuturesTicker) (fundingRate, bool) {
+	if strings.TrimSpace(t.MarkPrice) == "" && strings.TrimSpace(t.FundingRate) == "" {
+		return fundingRate{}, false
+	}
+	mark, _ := strconv.ParseFloat(t.MarkPrice, 64)
+	index, _ := strconv.ParseFloat(t.IndexPrice, 64)
+	rate, _ := strconv.ParseFloat(t.FundingRate, 64)
+	return fundingRate{
+		Symbol:          t.Contract,
+		MarkPrice:       mark,
+		IndexPrice:      index,
+		LastFundingRate: rate,
+		NextFundingTime: int64(t.FundingNextApply * 1000),
+	}, true
 }
 
 func gateTickerToPrice(t gateFuturesTicker) priceTicker {

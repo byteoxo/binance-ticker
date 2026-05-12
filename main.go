@@ -51,7 +51,6 @@ const (
 	orderBookRefreshInterval   = time.Second
 	defaultChartInterval       = "1h"
 	sparklineHistory           = 20
-	fundingRateRefreshInterval = 60 * time.Second
 	marketStatsRefreshInterval = 30 * time.Second
 	defaultVolumeHeight        = 4
 )
@@ -262,13 +261,10 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 	if len(cfg.Symbols) > 0 {
 		switch {
 		case cfg.isGate():
-			go runGateFundingRateLoop(ctx, client, cfg, state, ui.requestDraw)
 			go runGateMarketStatsLoop(ctx, client, cfg, state, ui.requestDraw)
 		case cfg.isOKX():
-			go runOKXFundingRateLoop(ctx, client, cfg, state, ui.requestDraw)
 			go runOKXMarketStatsLoop(ctx, client, cfg, state, ui.requestDraw)
 		default:
-			go runFundingRateLoop(ctx, client, cfg, state, ui.requestDraw)
 			go runMarketStatsLoop(ctx, client, cfg, state, ui.requestDraw)
 		}
 	}

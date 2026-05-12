@@ -17,85 +17,9 @@ import (
 	"time"
 )
 
-func runFundingRateLoop(ctx context.Context, client *http.Client, cfg config, state *appState, notify func()) {
-	fetch := func() {
-		rates, err := fetchFundingRates(ctx, client, cfg.RESTBase, cfg.Symbols)
-		if err != nil {
-			return
-		}
-		state.setFundingRates(rates)
-		notify()
-	}
-	fetch()
-	ticker := time.NewTicker(fundingRateRefreshInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			fetch()
-		}
-	}
-}
-
-func fetchFundingRates(ctx context.Context, client *http.Client, baseURL string, symbols []string) ([]fundingRate, error) {
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		return nil, err
-	}
-	parsed.Path = "/fapi/v1/premiumIndex"
-
-	rates := make([]fundingRate, 0, len(symbols))
-	for _, symbol := range symbols {
-		q := url.Values{}
-		q.Set("symbol", symbol)
-		parsed.RawQuery = q.Encode()
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
-		if err != nil {
-			continue
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			continue
-		}
-
-		var payload struct {
-			Symbol          string `json:"symbol"`
-			MarkPrice       string `json:"markPrice"`
-			IndexPrice      string `json:"indexPrice"`
-			LastFundingRate string `json:"lastFundingRate"`
-			NextFundingTime int64  `json:"nextFundingTime"`
-		}
-		if err := json.Unmarshal(body, &payload); err != nil {
-			continue
-		}
-		mark, _ := strconv.ParseFloat(payload.MarkPrice, 64)
-		index, _ := strconv.ParseFloat(payload.IndexPrice, 64)
-		rate, _ := strconv.ParseFloat(payload.LastFundingRate, 64)
-		rates = append(rates, fundingRate{
-			Symbol:          payload.Symbol,
-			MarkPrice:       mark,
-			IndexPrice:      index,
-			LastFundingRate: rate,
-			NextFundingTime: payload.NextFundingTime,
-		})
-	}
-	return rates, nil
-}
-
 func runMarketStatsLoop(ctx context.Context, client *http.Client, cfg config, state *appState, notify func()) {
 	fetch := func() {
 		for _, symbol := range cfg.Symbols {
-			if oi, err := fetchOpenInterest(ctx, client, cfg.RESTBase, symbol); err == nil {
-				state.setOpenInterest(oi)
-			}
 			if ls, err := fetchLongShortRatio(ctx, client, cfg.RESTBase, symbol); err == nil {
 				state.setLongShortRatio(ls)
 			}
@@ -113,42 +37,6 @@ func runMarketStatsLoop(ctx context.Context, client *http.Client, cfg config, st
 			fetch()
 		}
 	}
-}
-
-func fetchOpenInterest(ctx context.Context, client *http.Client, baseURL, symbol string) (openInterestData, error) {
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		return openInterestData{}, err
-	}
-	parsed.Path = "/fapi/v1/openInterest"
-	q := url.Values{}
-	q.Set("symbol", symbol)
-	parsed.RawQuery = q.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
-	if err != nil {
-		return openInterestData{}, err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return openInterestData{}, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return openInterestData{}, fmt.Errorf("open interest status %s", resp.Status)
-	}
-
-	var payload struct {
-		Symbol       string `json:"symbol"`
-		OpenInterest string `json:"openInterest"`
-		Time         int64  `json:"time"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return openInterestData{}, err
-	}
-	oi, _ := strconv.ParseFloat(payload.OpenInterest, 64)
-	return openInterestData{Symbol: payload.Symbol, OpenInterest: oi, Time: payload.Time}, nil
 }
 
 func fetchLongShortRatio(ctx context.Context, client *http.Client, baseURL, symbol string) (longShortRatioData, error) {

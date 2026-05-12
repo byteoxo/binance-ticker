@@ -252,78 +252,10 @@ func fetchOrderBookOKX(ctx context.Context, baseURL, compactSymbol string, panel
 	}, nil
 }
 
-func runOKXFundingRateLoop(ctx context.Context, client *http.Client, cfg config, state *appState, notify func()) {
-	fetch := func() {
-		rates, err := fetchOKXFundingRates(ctx, client, cfg.RESTBase, cfg.Symbols)
-		if err != nil {
-			return
-		}
-		state.setFundingRates(rates)
-		notify()
-	}
-	fetch()
-	ticker := time.NewTicker(fundingRateRefreshInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			fetch()
-		}
-	}
-}
-
-func fetchOKXFundingRates(ctx context.Context, client *http.Client, baseURL string, symbols []string) ([]fundingRate, error) {
-	rates := make([]fundingRate, 0, len(symbols))
-	for _, sym := range symbols {
-		instID := okxSwapInstID(sym)
-		path := okxAPIPrefix + "/public/funding-rate?" + url.Values{"instId": {instID}}.Encode()
-		reqURL := okxRESTHost(baseURL) + path
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-		if err != nil {
-			continue
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		var payload []struct {
-			InstID          string `json:"instId"`
-			Method          string `json:"method"`
-			FundingRate     string `json:"fundingRate"`
-			NextFundingTime string `json:"nextFundingTime"`
-			MarkPx          string `json:"markPx"`
-			IndexPx         string `json:"indexPx"`
-		}
-		if err := decodeOKXJSON(body, &payload); err != nil || len(payload) == 0 {
-			continue
-		}
-		p := payload[0]
-		mark, _ := strconv.ParseFloat(p.MarkPx, 64)
-		index, _ := strconv.ParseFloat(p.IndexPx, 64)
-		rate, _ := strconv.ParseFloat(p.FundingRate, 64)
-		nextMs, _ := strconv.ParseInt(p.NextFundingTime, 10, 64)
-		rates = append(rates, fundingRate{
-			Symbol:          okxCompactFromInstID(p.InstID),
-			MarkPrice:       mark,
-			IndexPrice:      index,
-			LastFundingRate: rate,
-			NextFundingTime: nextMs,
-		})
-	}
-	return rates, nil
-}
-
 func runOKXMarketStatsLoop(ctx context.Context, client *http.Client, cfg config, state *appState, notify func()) {
 	fetch := func() {
 		for _, sym := range cfg.Symbols {
 			instID := okxSwapInstID(sym)
-			if oi, err := fetchOKXOpenInterestSnapshot(ctx, client, cfg.RESTBase, instID); err == nil {
-				state.setOpenInterest(oi)
-			}
 			if ls, err := fetchOKXLongShortRatio(ctx, client, cfg.RESTBase, instID); err == nil {
 				state.setLongShortRatio(ls)
 			}
@@ -341,66 +273,6 @@ func runOKXMarketStatsLoop(ctx context.Context, client *http.Client, cfg config,
 			fetch()
 		}
 	}
-}
-
-func fetchOKXOpenInterestSnapshot(ctx context.Context, client *http.Client, baseURL, instID string) (openInterestData, error) {
-	path := okxAPIPrefix + "/public/open-interest?" + url.Values{"instId": {instID}}.Encode()
-	reqURL := okxRESTHost(baseURL) + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return openInterestData{}, err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return openInterestData{}, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return openInterestData{}, fmt.Errorf("okx open interest %s", resp.Status)
-	}
-
-	var payload []struct {
-		Oi string `json:"oi"`
-		Ts string `json:"ts"`
-	}
-	if err := decodeOKXJSON(body, &payload); err != nil {
-		return openInterestData{}, err
-	}
-	if len(payload) == 0 {
-		return openInterestData{}, fmt.Errorf("okx: empty open interest")
-	}
-	p := payload[0]
-	oi, _ := strconv.ParseFloat(p.Oi, 64)
-	ts, _ := strconv.ParseInt(p.Ts, 10, 64)
-
-	prevOI := oi
-	histPath := okxAPIPrefix + "/rubik/stat/contracts/open-interest-history?" + url.Values{
-		"instId": {instID},
-		"period": {"5m"},
-		"limit":  {"2"},
-	}.Encode()
-	histURL := okxRESTHost(baseURL) + histPath
-	hreq, err := http.NewRequestWithContext(ctx, http.MethodGet, histURL, nil)
-	if err == nil {
-		if hresp, err2 := client.Do(hreq); err2 == nil {
-			hbody, _ := io.ReadAll(hresp.Body)
-			hresp.Body.Close()
-			var hist [][]string
-			if decodeOKXJSON(hbody, &hist) == nil && len(hist) >= 2 {
-				if prevStr := hist[len(hist)-2]; len(prevStr) >= 2 {
-					prevOI, _ = strconv.ParseFloat(prevStr[1], 64)
-				}
-			}
-		}
-	}
-
-	return openInterestData{
-		Symbol:           okxCompactFromInstID(instID),
-		OpenInterest:     oi,
-		PrevOpenInterest: prevOI,
-		Time:             ts,
-	}, nil
 }
 
 func fetchOKXLongShortRatio(ctx context.Context, client *http.Client, baseURL, instID string) (longShortRatioData, error) {
