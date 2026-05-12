@@ -267,15 +267,6 @@ func (s *appState) applyChartCandle(panel panelMode, candle klineCandle, limit i
 	s.lastUpdate = time.Now()
 }
 
-func (s *appState) applyTickers(tickers []priceTicker) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, ticker := range tickers {
-		s.applyTickerLocked(ticker)
-	}
-	s.lastUpdate = time.Now()
-}
-
 func (s *appState) applyTicker(ticker priceTicker) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
