@@ -370,7 +370,6 @@ func parseWSKline(data []byte) (klineCandle, error) {
 
 func parseWSMarkPriceFunding(data []byte) (fundingRate, error) {
 	var p struct {
-		Event           string            `json:"e"`
 		Symbol          string            `json:"s"`
 		MarkPrice       string            `json:"p"`
 		IndexPrice      string            `json:"i"`
@@ -382,9 +381,6 @@ func parseWSMarkPriceFunding(data []byte) (fundingRate, error) {
 	}
 	if p.Symbol == "" {
 		return fundingRate{}, fmt.Errorf("mark price: missing symbol")
-	}
-	if p.Event != "" && p.Event != "markPriceUpdate" {
-		return fundingRate{}, fmt.Errorf("mark price: unexpected event %s", p.Event)
 	}
 	mark, _ := strconv.ParseFloat(p.MarkPrice, 64)
 	index, _ := strconv.ParseFloat(p.IndexPrice, 64)
@@ -400,7 +396,6 @@ func parseWSMarkPriceFunding(data []byte) (fundingRate, error) {
 
 func parseWSOpenInterest(data []byte) (openInterestData, error) {
 	var p struct {
-		Event        string            `json:"e"`
 		Symbol       string            `json:"s"`
 		OpenInterest string            `json:"o"`
 		EventTime    jsonFlexibleInt64 `json:"E"`
@@ -410,9 +405,6 @@ func parseWSOpenInterest(data []byte) (openInterestData, error) {
 	}
 	if p.Symbol == "" {
 		return openInterestData{}, fmt.Errorf("open interest: missing symbol")
-	}
-	if p.Event != "" && p.Event != "openInterest" {
-		return openInterestData{}, fmt.Errorf("open interest: unexpected event %s", p.Event)
 	}
 	oi, _ := strconv.ParseFloat(p.OpenInterest, 64)
 	return openInterestData{

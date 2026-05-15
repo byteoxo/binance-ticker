@@ -92,6 +92,18 @@ func envAPISecretName(exchange string) string {
 	}
 }
 
+// normalizeLegacyBinanceFuturesMarketWSBase maps the pre-migration combined-stream host to the
+// routed /market base so @ticker, @markPrice, @kline_*, etc. receive data.
+func normalizeLegacyBinanceFuturesMarketWSBase(wsBase string) string {
+	w := strings.TrimRight(strings.TrimSpace(wsBase), "/")
+	switch strings.ToLower(w) {
+	case "wss://fstream.binance.com", "ws://fstream.binance.com":
+		return "wss://fstream.binance.com/market"
+	default:
+		return w
+	}
+}
+
 // exchangeDefaults returns (restBase, wsBase) defaults for futures panel.
 func exchangeDefaults(exchange string) (string, string) {
 	switch exchange {
@@ -255,6 +267,10 @@ func loadConfig() (config, error) {
 	}
 	if wsBase == "" {
 		return config{}, fmt.Errorf("config %s field %q cannot be empty", path, "ws_base")
+	}
+
+	if exchange == "binance" {
+		wsBase = normalizeLegacyBinanceFuturesMarketWSBase(wsBase)
 	}
 
 	return config{

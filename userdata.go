@@ -19,6 +19,15 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// binanceFuturesPrivateUserDataURL builds the listenKey socket URL after Binance split futures WS
+// into /public, /market, and /private. cfg.WSBase is the market-stream base (…/market or legacy root).
+func binanceFuturesPrivateUserDataURL(wsBase, listenKey string) string {
+	root := strings.TrimRight(strings.TrimSpace(wsBase), "/")
+	root = strings.TrimSuffix(root, "/market")
+	root = strings.TrimSuffix(root, "/public")
+	return root + "/private/ws/" + listenKey
+}
+
 func runUserDataLoop(ctx context.Context, client *http.Client, cfg config, state *appState, notify func()) {
 	for {
 		if ctx.Err() != nil {
@@ -52,7 +61,7 @@ func runUserDataLoop(ctx context.Context, client *http.Client, cfg config, state
 }
 
 func consumeUserDataStream(ctx context.Context, client *http.Client, cfg config, state *appState, notify func(), listenKey string) error {
-	endpoint := strings.TrimRight(cfg.WSBase, "/") + "/ws/" + listenKey
+	endpoint := binanceFuturesPrivateUserDataURL(cfg.WSBase, listenKey)
 	dialer := websocket.Dialer{HandshakeTimeout: cfg.Timeout}
 	conn, _, err := dialer.DialContext(ctx, endpoint, nil)
 	if err != nil {

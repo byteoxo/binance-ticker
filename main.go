@@ -13,7 +13,9 @@ import (
 
 const (
 	// Binance Futures
-	defaultWSBaseURL   = "wss://fstream.binance.com"
+	// USD-M futures market streams (ticker, markPrice, kline, …) must use the routed /market base;
+	// unrouted wss://fstream.binance.com/stream only receives /public streams (Binance WS migration).
+	defaultWSBaseURL = "wss://fstream.binance.com/market"
 	defaultRESTBaseURL = "https://fapi.binance.com"
 	futuresKlinePath   = "/fapi/v1/klines"
 	positionRiskPath   = "/fapi/v3/positionRisk"
