@@ -100,16 +100,33 @@ func buildOrderBookUI() (tview.Primitive, *tview.Frame, *tview.Table) {
 	return overlay, frame, obTable
 }
 
+func (ui *uiModel) orderBookSymbolForPanel(panel panelMode) string {
+	if sym := getChartSymbolForPanel(ui.state, panel); sym != "" {
+		return sym
+	}
+	if panel == panelSpot {
+		tickers := spotSymbolsToTickers(ui.cfg.SpotSymbols)
+		if len(tickers) > 0 {
+			return tickers[0]
+		}
+		return ""
+	}
+	if len(ui.cfg.Symbols) > 0 {
+		return ui.cfg.Symbols[0]
+	}
+	return ""
+}
+
 func (ui *uiModel) showOrderBook() {
 	_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, panel, _ := ui.state.snapshot()
 
 	var symbol, baseURL string
 	switch panel {
 	case panelSpot:
-		symbol = getChartSymbolForPanel(ui.state, panelSpot)
+		symbol = ui.orderBookSymbolForPanel(panelSpot)
 		baseURL = spotRESTBaseURL(ui.cfg)
 	default:
-		symbol = getChartSymbolForPanel(ui.state, panelFutures)
+		symbol = ui.orderBookSymbolForPanel(panelFutures)
 		baseURL = ui.cfg.RESTBase
 	}
 
@@ -134,10 +151,10 @@ func (ui *uiModel) restartOrderBook() {
 	var symbol, baseURL string
 	switch panel {
 	case panelSpot:
-		symbol = getChartSymbolForPanel(ui.state, panelSpot)
+		symbol = ui.orderBookSymbolForPanel(panelSpot)
 		baseURL = spotRESTBaseURL(ui.cfg)
 	default:
-		symbol = getChartSymbolForPanel(ui.state, panelFutures)
+		symbol = ui.orderBookSymbolForPanel(panelFutures)
 		baseURL = ui.cfg.RESTBase
 	}
 	if symbol == "" || symbol == ui.orderBookSymbol {
@@ -157,7 +174,7 @@ func (ui *uiModel) restartOrderBook() {
 func (ui *uiModel) hideOrderBook() {
 	ui.orderBookOpen = false
 	ui.pages.HidePage("orderbook")
-	ui.app.SetFocus(ui.chart)
+	ui.focusChartOrTable()
 	if ui.orderBookCancel != nil {
 		ui.orderBookCancel()
 		ui.orderBookCancel = nil

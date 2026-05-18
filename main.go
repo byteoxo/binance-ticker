@@ -99,7 +99,7 @@ func main() {
 }
 
 func run(ctx context.Context, client *http.Client, cfg config, loc *time.Location, state *appState) error {
-	if len(cfg.Symbols) > 0 {
+	if len(cfg.Symbols) > 0 && cfg.chartsEnabled() {
 		if err := loadChartHistory(ctx, client, cfg, state); err != nil {
 			state.setError(fmt.Sprintf("chart init failed: %v", err))
 		}
@@ -120,7 +120,7 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 		}
 		if len(cfg.SpotSymbols) > 0 {
 			spotTickers := spotSymbolsToTickers(cfg.SpotSymbols)
-			if len(spotTickers) > 0 && (cfg.DefaultPanel == string(panelSpot) || len(cfg.Symbols) == 0) {
+			if cfg.chartsEnabled() && len(spotTickers) > 0 && (cfg.DefaultPanel == string(panelSpot) || len(cfg.Symbols) == 0) {
 				if err := loadChartHistoryForSymbol(ctx, client, spotRESTBase, panelSpot, spotTickers[0], cfg.ChartLimit, state); err != nil {
 					state.setSpotError(fmt.Sprintf("spot chart init failed: %v", err))
 				}
@@ -156,6 +156,9 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 	}
 
 	changeInterval := func() {
+		if !cfg.chartsEnabled() {
+			return
+		}
 		current := state.getChartInterval()
 		idx := 0
 		for i, iv := range chartIntervals {
@@ -190,6 +193,9 @@ func run(ctx context.Context, client *http.Client, cfg config, loc *time.Locatio
 	}
 
 	changeChart := func(offset int) {
+		if !cfg.chartsEnabled() {
+			return
+		}
 		_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, panel, _ := state.snapshot()
 
 		var symbols []string

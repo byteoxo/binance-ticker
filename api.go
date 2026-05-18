@@ -320,6 +320,10 @@ func parseSpotBalance(item spotBalancePayload, allowed map[string]struct{}) (spo
 }
 
 func loadChartHistoryForSymbol(ctx context.Context, client *http.Client, baseURL string, panel panelMode, symbol string, limit int, state *appState) error {
+	if limit <= 0 {
+		state.setChart(panel, "", nil)
+		return nil
+	}
 	interval := state.getChartInterval()
 	klines, err := fetchKlines(ctx, client, baseURL, symbol, interval, limit, panel)
 	if err != nil {

@@ -88,7 +88,20 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 		{"Ctrl+C", "Quit"},
 		{"Esc", "Close help / modal / order book"},
 	}
-	for i, row := range helpRows {
+	helpRowSlice := helpRows[:]
+	if !cfg.chartsEnabled() {
+		filtered := make([][2]string, 0, len(helpRows)-3)
+		for _, row := range helpRows {
+			switch row[0] {
+			case "Up / Left", "Down / Right", "i":
+				continue
+			default:
+				filtered = append(filtered, row)
+			}
+		}
+		helpRowSlice = filtered
+	}
+	for i, row := range helpRowSlice {
 		helpTable.SetCell(i+1, 0, tview.NewTableCell(row[0]).SetSelectable(false))
 		helpTable.SetCell(i+1, 1, tview.NewTableCell("      ").SetSelectable(false))
 		helpTable.SetCell(i+1, 2, tview.NewTableCell(row[1]).SetSelectable(false))
@@ -131,11 +144,15 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 	footer.SetBackgroundColor(tcell.ColorDefault)
 	header.SetBorder(true).SetTitle("Overview")
 	status.SetBorder(true).SetTitle("Status")
-	table.SetBorder(true).SetTitle("Contracts")
+	table.SetBorder(true).SetTitle("Market")
 	positions.SetBorder(true).SetTitle("Positions")
 	chart.SetBorder(true).SetTitle("1H Chart")
 	footer.SetBorder(true)
-	footer.SetText("/ or h help | Tab switch panel | Arrows switch chart | i interval | o order book | u open orders | q / Ctrl+C quit")
+	if cfg.chartsEnabled() {
+		footer.SetText("/ or h help | Tab switch panel | Arrows switch chart | i interval | o order book | u open orders | q / Ctrl+C quit")
+	} else {
+		footer.SetText("/ or h help | Tab switch panel | o order book | u open orders | q / Ctrl+C quit")
+	}
 
 	ob, obFrame, obTable := buildOrderBookUI()
 	oo, ooFrame, ooTable, ooHint := buildOpenOrdersUI()
@@ -268,7 +285,7 @@ func newUI(cfg config, loc *time.Location, state *appState, changeChart func(int
 			ui.showHelp()
 			return nil
 		case 'i', 'I':
-			if ui.changeInterval != nil {
+			if ui.changeInterval != nil && ui.cfg.chartsEnabled() {
 				go func() {
 					ui.changeInterval()
 					ui.requestDraw()
@@ -338,12 +355,24 @@ func (ui *uiModel) layout() tview.Primitive {
 	left := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(ui.table, 0, 4, false).
 		AddItem(ui.positions, 0, 5, false)
+	middle := tview.Primitive(left)
+	if ui.cfg.chartsEnabled() {
+		middle = tview.NewFlex().SetDirection(tview.FlexColumn).AddItem(left, 0, 3, false).AddItem(ui.chart, 0, 2, false)
+	}
 	content := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(ui.header, 6, 0, false).
 		AddItem(ui.status, 5, 0, false).
-		AddItem(tview.NewFlex().SetDirection(tview.FlexColumn).AddItem(left, 0, 3, false).AddItem(ui.chart, 0, 2, false), 0, 1, false).
+		AddItem(middle, 0, 1, false).
 		AddItem(ui.footer, 3, 0, false)
 	return content
+}
+
+func (ui *uiModel) focusChartOrTable() {
+	if ui.cfg.chartsEnabled() {
+		ui.app.SetFocus(ui.chart)
+		return
+	}
+	ui.app.SetFocus(ui.table)
 }
 
 func (ui *uiModel) root() tview.Primitive {
@@ -359,7 +388,7 @@ func (ui *uiModel) showHelp() {
 func (ui *uiModel) hideHelp() {
 	ui.helpOpen = false
 	ui.pages.HidePage("help")
-	ui.app.SetFocus(ui.chart)
+	ui.focusChartOrTable()
 }
 
 func (ui *uiModel) runClock(ctx context.Context) {
@@ -407,7 +436,7 @@ func (ui *uiModel) refresh() {
 		accountUpdate = spotAccountLastUpdate
 	}
 
-	ui.header.SetText(fmt.Sprintf(
+	headerBody := fmt.Sprintf(
 		"panel: %s\nfutures: %s\nspot: %s\nconfig: %s\nnow: %s\nstarted: %s\nmarket update: %s",
 		panelName,
 		strings.Join(ui.cfg.Symbols, ","),
@@ -416,7 +445,15 @@ func (ui *uiModel) refresh() {
 		formatTime(time.Now(), ui.loc, false),
 		formatTime(startedAt, ui.loc, false),
 		formatOptionalTime(marketUpdate, ui.loc),
-	))
+	)
+	if modalMessage != "" && !ui.cfg.chartsEnabled() {
+		ui.header.SetText(fmt.Sprintf("%s\n\n%s\n\n%s",
+			ui.colorize("yellow", escapeTView(modalMessage)),
+			"Press Esc or Enter to dismiss",
+			headerBody))
+	} else {
+		ui.header.SetText(headerBody)
+	}
 
 	statusText := "[green]ok[-]"
 	if marketStatus != "" {
@@ -431,16 +468,20 @@ func (ui *uiModel) refresh() {
 		ui.positions.SetTitle("Spot Balances")
 		ui.renderSpotTable(spotRows)
 		ui.renderSpotBalances(spotBalances, spotAccountError)
-		ui.renderChart(chart, chartSymbol, chartInterval)
+		if ui.cfg.chartsEnabled() {
+			ui.renderChart(chart, chartSymbol, chartInterval)
+		}
 	} else {
-		ui.table.SetTitle("Contracts")
+		ui.table.SetTitle("Market")
 		ui.positions.SetTitle("Positions")
 		ui.renderTable(rows)
 		ui.renderPositions(positions, accountEnabled, accountError, accountLastUpdate)
-		ui.renderChart(chart, chartSymbol, chartInterval)
+		if ui.cfg.chartsEnabled() {
+			ui.renderChart(chart, chartSymbol, chartInterval)
+		}
 	}
 
-	if modalMessage != "" {
+	if modalMessage != "" && ui.cfg.chartsEnabled() {
 		ui.chart.SetTitle("Notice")
 		ui.chart.SetText(modalMessage + "\n\nPress Esc or Enter to close")
 	}
@@ -666,6 +707,9 @@ func buildSpotSummary(balances []spotBalance) string {
 }
 
 func (ui *uiModel) renderChart(candles []klineCandle, symbol, interval string) {
+	if !ui.cfg.chartsEnabled() {
+		return
+	}
 	if symbol == "" {
 		symbol = ui.cfg.ChartSymbol
 	}

@@ -70,6 +70,11 @@ func (cfg config) isOKX() bool {
 	return cfg.Exchange == "okx"
 }
 
+// chartsEnabled reports whether REST/WS should load candlesticks and the UI should show the chart panel.
+func (cfg config) chartsEnabled() bool {
+	return cfg.ChartLimit > 0
+}
+
 func envAPIKeyName(exchange string) string {
 	switch exchange {
 	case "gate":
@@ -136,7 +141,7 @@ func loadConfig() (config, error) {
 		return config{}, fmt.Errorf("decode config %s: %w", path, err)
 	}
 
-	required := []string{"symbols", "chart_symbol", "chart_limit", "default_panel", "timeout", "tz", "no_color", "retry_delay"}
+	required := []string{"symbols", "chart_limit", "default_panel", "timeout", "tz", "no_color", "retry_delay"}
 	for _, key := range required {
 		if !meta.IsDefined(key) {
 			return config{}, fmt.Errorf("config %s missing required field %q", path, key)
@@ -194,15 +199,12 @@ func loadConfig() (config, error) {
 		}
 		chartSymbol = c
 	}
-	if chartSymbol == "" && len(symbols) > 0 {
-		return config{}, fmt.Errorf("config %s field %q cannot be empty when futures symbols are configured", path, "chart_symbol")
-	}
 	chartLimit := raw.ChartLimit
-	if len(symbols) > 0 && chartLimit <= 0 {
-		return config{}, fmt.Errorf("config %s field %q must be greater than 0 when futures symbols are configured", path, "chart_limit")
+	if chartLimit < 0 {
+		return config{}, fmt.Errorf("config %s field %q must be >= 0", path, "chart_limit")
 	}
-	if len(symbols) == 0 && chartLimit <= 0 {
-		chartLimit = defaultChartLimit
+	if chartSymbol == "" && len(symbols) > 0 && chartLimit > 0 {
+		return config{}, fmt.Errorf("config %s field %q cannot be empty when futures symbols are configured and chart_limit > 0", path, "chart_symbol")
 	}
 
 	defaultPanel := panelMode(strings.ToLower(strings.TrimSpace(raw.DefaultPanel)))

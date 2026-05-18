@@ -604,7 +604,7 @@ func (ui *uiModel) hideOpenOrders() {
 		ui.pages.RemovePage("orderform")
 	}
 	ui.pages.HidePage("openorders")
-	ui.app.SetFocus(ui.chart)
+	ui.focusChartOrTable()
 	if ui.openOrdersCancel != nil {
 		ui.openOrdersCancel()
 		ui.openOrdersCancel = nil

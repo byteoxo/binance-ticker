@@ -196,14 +196,14 @@ func newAppState(cfg config) *appState {
 	}
 
 	futuresChartSymbol := ""
-	if len(cfg.Symbols) > 0 {
+	if len(cfg.Symbols) > 0 && cfg.chartsEnabled() {
 		futuresChartSymbol = cfg.ChartSymbol
 		if futuresChartSymbol == "" {
 			futuresChartSymbol = cfg.Symbols[0]
 		}
 	}
 	spotChartSymbol := ""
-	if len(spotTickers) > 0 {
+	if len(spotTickers) > 0 && cfg.chartsEnabled() {
 		spotChartSymbol = spotTickers[0]
 	}
 
@@ -242,7 +242,7 @@ func (s *appState) applyChartCandle(panel panelMode, candle klineCandle, limit i
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if limit <= 0 {
-		limit = defaultChartLimit
+		return
 	}
 
 	chart := s.futuresChart
